@@ -50,7 +50,8 @@ Resolve `$METER` to the first of these that exists:
 
 `$COST` resolves the same way, as `cost.sh` in that same directory.
 
-Pass `$ARGUMENTS` through as the session id when the user supplied one.
+When this skill was invoked with an argument, that argument is the session id to
+meter instead of the current one.
 
 If the meter exits non-zero, report the stderr verbatim and stop. Do not
 estimate numbers it failed to produce.
@@ -103,6 +104,9 @@ Two things this reports that are easy to miss:
 
 - **`promo_applied`** — a promotional rate was in effect when those tokens were
   burned. Mention it when true; it explains a figure that won't reproduce later.
+  It is true when **any** lane billed at a promo, so check `promo_models` and
+  name them: a session mixing a promo model with a full-rate one is the normal
+  case, and "partly promotional" is the accurate thing to say.
 - **`pricing_source`** — which rate table produced the number, as
   `source@verified-date`.
 

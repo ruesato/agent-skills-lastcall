@@ -57,9 +57,10 @@ first location that exists:
 "$METER" ${CLAUDE_SESSION_ID}
 ```
 
-**Always pass the session id**, and pass `$ARGUMENTS` instead when the user
-named a session. With no id the meter falls back to the newest transcript in the
-project directory, which is the wrong session whenever two share a directory.
+**Always pass a session id.** Use the id above by default; when this skill was
+invoked with an argument, that argument is the session to meter instead. With no
+id at all the meter falls back to the newest transcript in the project
+directory, which is the wrong session whenever two share a directory.
 
 Keep this output. You need it again in step 7, and re-running the meter mid-flow
 gives a different (larger) number that will not match what the user approved.
@@ -73,7 +74,10 @@ printf '%s' "$M" | "$COST"
 ```
 
 Report `total_usd`, and mention `promo_applied` when true — a promotional rate
-explains a figure that will not reproduce later. On an unknown-model error,
+explains a figure that will not reproduce later. It is true when **any** lane
+billed at a promo, so name the models from `promo_models`; a session mixing a
+promo model with a full-rate one is the normal case, and reporting it as
+wholly promotional is as wrong as dropping it. On an unknown-model error,
 report token counts with **no dollar figure**. Never substitute a guessed rate:
 a wrong cost figure is worse than none, because nothing about it looks wrong.
 See `../lastcall-shared/references/pricing.md`.

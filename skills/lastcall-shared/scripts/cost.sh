@@ -62,6 +62,15 @@ jq -s --slurpfile r "$RATES" '
       total_usd: ($priced | map(.usd) | add | .*10000 | round / 10000),
       by_model:  ($priced | map({model, lane, usd: (.usd*10000|round/10000), promo_applied})),
 
+      # Rollup, because consumers read the top level. Without this the key was
+      # absent entirely, so `.promo_applied` came back null on a session that
+      # really did bill at promotional rates, and the readout dropped it.
+      # True when ANY lane billed at a promo: a mixed session is the common
+      # case, and promo_models says which, so "partly promotional" is
+      # reportable instead of collapsing to a misleading yes/no.
+      promo_applied: ($priced | map(.promo_applied) | any),
+      promo_models:  ($priced | map(select(.promo_applied) | .model) | unique),
+
       # Where the money actually went, in dollars rather than tokens.
       by_bucket: {
         input:       ($priced | map(.input      * (if .promo_applied then $rates.models[(.model|sub("-20[0-9]{6}$";""))].promo.input else $rates.models[(.model|sub("-20[0-9]{6}$";""))].input end)) | add / 1000000),

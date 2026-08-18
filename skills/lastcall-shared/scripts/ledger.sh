@@ -149,13 +149,25 @@ cmd_trend() {
     + (if $focus == "" then {} else
         ($all | map(select(.session_id == $focus)) | first) as $s
         | if $s == null then { focus: { error: "session \($focus) not in ledger" } }
-          else { focus: {
+          else
+            # Compare against PEERS, not against every row. Including the focus
+            # session in its own baseline drags the median toward itself, and at
+            # small n the median can land exactly on it — which produced a
+            # confident "1x" that meant nothing. Stay silent below the same
+            # threshold that triggers baseline_note: a ratio against one or two
+            # other sessions is noise presented as a finding.
+            ($all | map(select(.session_id != $focus))) as $peers
+          | { focus: {
               session_id: $s.session_id,
               usd: $s.cost.usd,
               vs_median_usd:
-                (($all | map(.cost.usd) | pct(0.5)) as $m
-                 | if $m == null or $m == 0 then null
+                (($peers | map(.cost.usd) | pct(0.5)) as $m
+                 | if $m == null or $m == 0 or ($peers | length) < 5 then null
                    else "\((($s.cost.usd / $m)*10|round)/10)x" end),
+              vs_median_basis:
+                (if ($peers | length) < 5
+                 then "suppressed — only \($peers|length) other session(s) to compare against"
+                 else "median of \($peers|length) other sessions" end),
               per_task_usd: (if $s.evidence != null and $s.evidence.completed > 0
                              then ($s.cost.usd / $s.evidence.completed | r2) else null end)
             } } end
