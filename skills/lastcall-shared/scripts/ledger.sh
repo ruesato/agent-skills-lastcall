@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
 # ledger.sh — session history, and the baseline that makes ratios mean something.
 #
-#   meter-session.sh <id> | ledger.sh append     # write/replace this session's row
+#   meter-session.sh <id> | ledger.sh append [sha ...]   # write/replace this row
 #   ledger.sh trend [session-id]                 # baseline, optionally comparing one session
 #   ledger.sh list [--cwd PATH]                  # dump rows
+#
+# Any SHAs passed to `append` land in work.commits — last-call passes the
+# commits its delegation actually created.
 #
 # Written by last-call only. tally never writes.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve through symlinks — see cost.sh for why.
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+  target="$(readlink "$SELF")"
+  case "$target" in /*) SELF="$target" ;; *) SELF="$(dirname "$SELF")/$target" ;; esac
+done
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
 LEDGER="${LASTCALL_LEDGER:-$HOME/.claude/last-call/ledger.jsonl}"
 PROJECTS="${CLAUDE_PROJECTS:-$HOME/.claude/projects}"
 COST="$HERE/cost.sh"
@@ -51,14 +60,18 @@ evidence_for() {
 }
 
 cmd_append() {
-  local meter cost sid cwd ev row
+  local meter cost sid cwd ev row commits
+  # Commits created by last-call's delegation, if any. Passed in rather than
+  # derived: only the caller knows which commits belong to this session.
+  commits="$(printf '%s\n' "$@" | jq -Rs 'split("\n") | map(select(length > 0))')"
   meter="$(cat)"
   cost="$(printf '%s' "$meter" | "$COST")"
   sid="$(printf '%s' "$meter" | jq -r '.session.id')"
   cwd="$(printf '%s' "$meter" | jq -r '.session.cwd')"
   ev="$(evidence_for "$sid" "$cwd")"
 
-  row=$(jq -cn --argjson m "$meter" --argjson c "$cost" --argjson e "$ev" '
+  row=$(jq -cn --argjson m "$meter" --argjson c "$cost" --argjson e "$ev" \
+              --argjson commits "$commits" '
     { schema: "lastcall.ledger/1",
       session_id: $m.session.id,
       metered_at: (now | todateiso8601),
@@ -70,7 +83,7 @@ cmd_append() {
       tokens: $m.tokens,
       work: { tool_calls: ($m.work.tools | to_entries | map(.value) | add // 0),
               files_changed: ($m.work.files | length),
-              commits: [] },
+              commits: $commits },
       friction: $m.friction,
       # null, not zeroes: "no evidence" and "zero tasks done" are different claims.
       evidence: $e }')
@@ -154,5 +167,5 @@ case "${1:-}" in
   append) shift; cmd_append "$@" ;;
   trend)  shift; cmd_trend "$@" ;;
   list)   shift; cmd_list "$@" ;;
-  *) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

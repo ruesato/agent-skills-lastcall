@@ -1,0 +1,248 @@
+---
+name: last-call
+description: Close out a work session — meter what it cost, summarize what actually landed and what is still open, then offer to commit, save memories, publish a report, and update the tracker. Every durable action happens only after you approve it.
+when_to_use: Use when the user is ending a session — "let's wrap up", "close this out", "I'm done for the day", "call it here" — or types /last-call. For a mid-session checkpoint with no side effects, use the tally skill instead; tally measures, last-call measures and then acts.
+argument-hint: "[session-id]"
+allowed-tools:
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/meter-session.sh *)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/meter-session.sh:*)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/cost.sh *)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/cost.sh:*)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/openloops.sh *)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/openloops.sh:*)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/ledger.sh *)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/ledger.sh:*)
+---
+
+# last-call
+
+Measure the session, say what landed, **ask**, then act.
+
+`allowed-tools` above pre-approves the four metering scripts — all read-only.
+It deliberately does **not** pre-approve `git commit`, `Write`, or the tracker.
+Those still go through the normal permission prompt, so the gate in step 5 is
+backed by a second, independent check rather than being the only thing standing
+between a suggestion and a durable action.
+
+## The one rule
+
+**No durable action happens before the gate.** Steps 1–4 read. Step 5 asks.
+Only step 6 writes.
+
+Committing code, saving memories, publishing a report, and updating a tracker
+are outward-facing and awkward to reverse. The user sees the summary first and
+picks which of them fire. This ordering is the whole point of the skill — if you
+find yourself committing before summarizing, stop and start over.
+
+**Partial completion is the normal path.** The user approving two of four
+delegations is a success, not a degraded run. Never re-ask for a declined
+delegation, and never let one delegation's failure abort the others.
+
+---
+
+## 1. Meter
+
+Resolve `$METER`, `$COST`, `$OPENLOOPS`, and `$LEDGER_SH` to the first location
+that exists:
+
+1. `${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/<script>` — substituted in
+   Claude Code, and matches the `allowed-tools` grants above, so it runs without
+   a prompt.
+2. `~/.lastcall/bin/<script>` — a fixed absolute path created by `install.sh`.
+   Use this in Kiro, which has no skill-directory variable.
+
+```bash
+"$METER" ${CLAUDE_SESSION_ID}
+```
+
+**Always pass the session id**, and pass `$ARGUMENTS` instead when the user
+named a session. With no id the meter falls back to the newest transcript in the
+project directory, which is the wrong session whenever two share a directory.
+
+Keep this output. You need it again in step 7, and re-running the meter mid-flow
+gives a different (larger) number that will not match what the user approved.
+
+If the meter exits non-zero, report stderr verbatim and stop. Do not estimate.
+
+## 2. Cost
+
+```bash
+printf '%s' "$M" | "$COST"
+```
+
+Report `total_usd`, and mention `promo_applied` when true — a promotional rate
+explains a figure that will not reproduce later. On an unknown-model error,
+report token counts with **no dollar figure**. Never substitute a guessed rate:
+a wrong cost figure is worse than none, because nothing about it looks wrong.
+See `../lastcall-shared/references/pricing.md`.
+
+## 3. Evidence and open loops
+
+```bash
+printf '%s' "$M" | "$OPENLOOPS"
+```
+
+Evidence arrives through the drop-box at `<session>/evidence/*.json` — other
+skills write there, and the meter folds it into `.evidence`. Glob it, skip
+unparseable files with a warning rather than aborting, and dedupe on
+`(source, task.id)` keeping the highest `emitted_at`. Full shape in
+`../lastcall-shared/references/contracts.md` section 2.
+
+`openloops.sh` gives you `session_files_uncommitted`, `churn_hotspots`,
+`todos_added`, and `evidence_open`. Its `git.dirty` also decides whether the
+commit delegation is offered at all in step 5.
+
+## 4. Summarize
+
+**Read `../lastcall-shared/references/summary.md` and follow it.** It is the
+doctrine for this half, not background reading.
+
+The single rule that matters most: every claim under **Landed** must trace to an
+artifact — a file path, a commit SHA, a task id, a test result. Transcripts are
+dense with intentions that never landed, and from the inside an intention and an
+accomplishment read almost identically. If it traces to nothing, it goes under
+*narrative*, clearly marked, or nowhere.
+
+Sections: Headline, Landed, Open loops, Friction, Cost. Emit ratios with
+explicit denominators, **never a composite productivity score**. With no
+evidence, per-task ratios are "not assessed" — say so plainly rather than
+inferring output from token burn, which rewards thrashing.
+
+## 5. The gate
+
+Present the summary, then ask which delegations to run. Use `AskUserQuestion`
+with `multiSelect: true`, and offer only what applies:
+
+| Delegation | Offer it when | Skip it when |
+|---|---|---|
+| Commit | `git.dirty` is true | tree is clean |
+| Memories | something durable was learned | nothing was |
+| Report | always | — |
+| Tracker | a tracker is configured (`bd`, Linear, Asana) | none is |
+
+Two things not to do here: do not offer a delegation you already know has
+nothing to do, and do not manufacture work to fill a slot. An unoffered
+delegation is the correct outcome when its precondition is absent.
+
+If the user declines everything, go straight to step 7. The ledger row is a
+measurement, not a delegation — it is written either way.
+
+## 6. Delegate
+
+Run only what was approved. Each is independent: **catch failures per
+delegation, report them, and continue to the next.** One failure never strands
+the rest.
+
+### Commit
+
+The user's standing rule applies verbatim:
+
+> **Try once. On a git lock error — or any other error — stop and print the
+> commit message for them to commit manually. Never retry.**
+
+This is not a suggestion to soften. A retry loop against a lock file is how you
+end up with a half-staged tree the user did not ask for.
+
+- Semantic-release format, with bullets summarizing the changes.
+- If the task referenced tracker ids (`Linear [ONC-5]`, `agent-skill-wrapup-7re`),
+  append `Closes …` listing them.
+- Capture the resulting SHA — step 7 puts it in the ledger row.
+
+**Re-running `last-call` must not double-commit.** The precondition is a dirty
+tree, checked fresh in step 3. After a successful commit the tree is clean, so a
+second run does not offer the delegation at all. Do not "helpfully" amend or
+re-commit an already-committed change.
+
+### Memories
+
+Follow the environment's memory system (here, `memory/MEMORY.md` plus one file
+per fact). **Skip silently when nothing durable was learned.** A session that
+taught you nothing worth carrying forward should produce no memory — a
+manufactured one is worse than an absent one, because it dilutes recall for
+every future session.
+
+Save what was non-obvious: a constraint discovered, a preference the user
+expressed, a dead end worth not re-walking. Not what the repo already records.
+
+### Report
+
+Publish the step-4 summary as a shareable artifact. **If artifact publishing is
+unavailable, fall back to terminal output** — the summary is the deliverable,
+the artifact is just its nicest form. Never let a publishing failure lose it.
+
+### Tracker
+
+Close or update the issues the evidence says moved, and file new issues for the
+open loops from step 3. **On an API failure, report it and continue** — the
+tracker is downstream of the work, and a failed sync is a nuisance, not a reason
+to abandon the wrap-up. Print what you would have filed so nothing is lost.
+
+## 7. Re-meter, then write the ledger
+
+Meter **again**, now that delegation is done:
+
+```bash
+M2="$("$METER" ${CLAUDE_SESSION_ID})"
+printf '%s' "$M2" | "$LEDGER_SH" append <sha> ...
+```
+
+Why twice: the first reading was taken before this skill did its own work, so it
+understates the session by exactly the amount `last-call` cost. The second
+reading is what the ledger should carry. It is a jq pass over a local file — the
+second run is free.
+
+Pass any SHAs the commit delegation produced; they land in `work.commits`.
+
+The ledger is **keyed on `session_id` alone** and replaces that session's row in
+place, so re-running never appends a duplicate. Written by `last-call` only —
+`tally` never writes.
+
+Note: if the gate involved a free-text reply, the `allowed-tools` grant has
+cleared and this call may prompt for permission. That is expected, not a fault.
+
+## 8. Emit
+
+Close with the final numbers from `M2`, plus the trend:
+
+```bash
+"$LEDGER_SH" trend ${CLAUDE_SESSION_ID}
+```
+
+Prefer "2.3× your median session" over a bare dollar figure — one session's cost
+means nothing without the baseline. When `trend` reports `baseline_note` (under
+five rows), **pass that caveat through** rather than presenting a median of
+three as typical.
+
+State plainly what ran and what did not: "committed a1b2c3d, saved 2 memories,
+skipped the report, tracker update failed — here's the error." A wrap-up that
+overstates itself defeats its own purpose.
+
+---
+
+## Relationship to the beads session-close protocol
+
+This project's `CLAUDE.md` carries a beads-managed **Session Completion**
+protocol that also claims session end. They do not conflict; `last-call`
+subsumes it, with one carve-out:
+
+| Beads step | Here |
+|---|---|
+| 1. File issues for remaining work | The **tracker** delegation, fed by `openloops.sh` |
+| 2. Run quality gates | **Not automated.** See below |
+| 3. Update issue status | The **tracker** delegation |
+| 4. Handle git by profile | The **commit** delegation, behind the gate |
+| 5. Hand off | Steps 4 and 8 |
+
+The gate *is* the conservative profile's "ask first" — an explicit approval per
+durable action, which is strictly stronger than the profile requires.
+
+**Quality gates stay manual on purpose.** A test command that exits non-zero is
+indistinguishable in a transcript from a grep that found nothing, so inferring a
+pass or a failure from exit codes produces confident, wrong claims. Read the
+transcript for test outcomes and report what you actually find, or say nothing.
+
+## Notes
+
+This skill does not set `disable-model-invocation`. Conversational invocation —
+"let's wrap up here" — is the primary path, and blocking it would leave only the
+slash command. Safety comes from the gate, not from being hard to reach.

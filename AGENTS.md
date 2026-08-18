@@ -128,3 +128,26 @@ bd prime                # Refresh Beads context
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 <!-- END BEADS CODEX SETUP -->
+
+## Session Completion: `/last-call` subsumes the Beads protocol
+
+Both the "Session Completion" block above and this project's `/last-call` skill
+claim session end. `/last-call` is the entry point; the resolution is:
+
+| Beads step | Where it happens |
+|---|---|
+| 1. File issues for remaining work | `/last-call` tracker delegation, fed by `openloops.sh` |
+| 2. Run quality gates | **Not automated** — see below |
+| 3. Update issue status | `/last-call` tracker delegation |
+| 4. Handle git by profile | `/last-call` commit delegation, behind the user gate |
+| 5. Hand off | The `/last-call` summary |
+
+`/last-call` gates every durable action on explicit user approval, which is a
+stronger guarantee than the conservative profile's "ask first", not a weaker one.
+
+**Quality gates stay manual on purpose.** A test command that exits non-zero is
+indistinguishable in a transcript from a grep that matched nothing, so test state
+is never inferred from exit codes. Report what you actually observed, or nothing.
+
+Full detail in `skills/last-call/SKILL.md`. Note that this section sits outside
+the generated blocks above — `bd setup` rewrites those, so do not move it inside.

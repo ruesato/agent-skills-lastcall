@@ -65,14 +65,29 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 This is a **shell + jq project**. There is no `package.json`, so the JS/TS defaults in
 `~/code/CLAUDE.md` (`pnpm dev`, `pnpm build`, `pnpm test`) do **not** apply here.
 
+All scripts live in `skills/lastcall-shared/scripts/`. The full pipeline:
+
 ```bash
-./meter-session.sh                  # meter the current session
-./meter-session.sh <session-uuid>   # meter a specific session
-IDLE_GAP_S=600 ./meter-session.sh   # widen the idle threshold
+S=skills/lastcall-shared/scripts
+M=$($S/meter-session.sh <session-uuid>)   # always pass the id; the fallback
+                                          # picks the newest transcript, which
+                                          # is wrong when sessions share a dir
+printf '%s' "$M" | $S/cost.sh             # dollars
+printf '%s' "$M" | $S/openloops.sh        # what is unfinished
+printf '%s' "$M" | $S/ledger.sh append [sha ...]   # write/replace this row
+$S/ledger.sh trend <session-uuid>         # baseline + focus comparison
+IDLE_GAP_S=600 $S/meter-session.sh        # widen the idle threshold
 ```
+
+Set `LASTCALL_LEDGER` to a scratch path while testing so the real baseline at
+`~/.claude/last-call/ledger.jsonl` is not polluted.
 
 Verify a change by running the meter across every local transcript and confirming all
 sessions exit 0 — sessions with and without subagents exercise different code paths.
+
+`./install.sh --target claude` links the skills and puts the four scripts on a fixed
+path under `~/.lastcall/bin`. A skill with no `SKILL.md` is skipped rather than
+installed as an empty directory.
 
 ## Architecture Overview
 
@@ -98,6 +113,14 @@ sessions, so active time uses gap bucketing.
 
 - **Memory**: use this environment's `memory/MEMORY.md` system for session memories.
   The beads block above is task tracking, not a replacement for it.
+- **`/last-call` subsumes the beads "Session Completion" protocol above.** They both
+  claim session end, and this is the resolution: the tracker delegation covers steps
+  1 and 3 (file issues, update status), the commit delegation covers step 4, and the
+  summary covers step 5. Step 2 (quality gates) stays manual — a test command that
+  exits non-zero is indistinguishable in a transcript from a grep that matched
+  nothing, so test state is never inferred. `last-call`'s user gate is a stronger
+  guarantee than the conservative profile's "ask first", not a weaker one: it asks
+  per durable action. The overlap is documented in `skills/last-call/SKILL.md`.
 - **Cost math stays out of the meter.** The meter counts tokens; pricing is applied
   downstream from the `claude-api` skill. Never hardcode rates.
 - **Evidence is a drop-box.** External skills contribute work summaries by writing

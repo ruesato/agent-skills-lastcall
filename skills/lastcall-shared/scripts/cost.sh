@@ -8,7 +8,15 @@
 # change), this applies rates (which do). See ../references/pricing.md.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve through symlinks: install.sh links this onto PATH, and rates.json
+# lives beside the real file, not beside the link. `readlink -f` is GNU-only,
+# so walk the chain by hand.
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+  target="$(readlink "$SELF")"
+  case "$target" in /*) SELF="$target" ;; *) SELF="$(dirname "$SELF")/$target" ;; esac
+done
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
 RATES="${LASTCALL_RATES:-$HERE/rates.json}"
 [ -f "$RATES" ] || { echo "no rate table at $RATES" >&2; exit 1; }
 

@@ -14,6 +14,10 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILLS=(last-call tally lastcall-shared)
 
+# Every script a skill invokes by bare name. rates.json is NOT listed: cost.sh
+# resolves its own symlink and reads the rate table from beside the real file.
+BINSCRIPTS=(meter-session.sh cost.sh ledger.sh openloops.sh)
+
 # Fixed absolute home for the scripts. Kiro has no skill-directory variable, so
 # a relative path from a SKILL.md cannot be executed there — the skills fall
 # back to this path. See references/contracts.md section 0.
@@ -72,7 +76,11 @@ if [ "$MODE" = uninstall ]; then
       fi
     done
   done
-  [ -L "$BIN/meter-session.sh" ] && { rm "$BIN/meter-session.sh"; echo "  removed $BIN/meter-session.sh"; }
+  # `if`, not `[ -L … ] && …`: under set -e a false test as the loop's last
+  # command exits the script, silently skipping the rest of the uninstall.
+  for s in "${BINSCRIPTS[@]}"; do
+    if [ -L "$BIN/$s" ]; then rm "$BIN/$s"; echo "  removed $BIN/$s"; fi
+  done
   echo "Uninstalled. Left ~/.claude/last-call/ledger.jsonl in place."
   exit 0
 fi
@@ -93,7 +101,9 @@ done
 
 mkdir -p "$BIN"
 echo "$BIN"
-link "$SRC/skills/lastcall-shared/scripts/meter-session.sh" "$BIN/meter-session.sh"
+for s in "${BINSCRIPTS[@]}"; do
+  link "$SRC/skills/lastcall-shared/scripts/$s" "$BIN/$s"
+done
 
 echo
 echo "Verifying meter runs from the installed path..."

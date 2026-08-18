@@ -18,7 +18,16 @@ should invoke it, and both flags above are set to make sure nothing can.
 | Path | Purpose |
 |---|---|
 | `references/contracts.md` | The three interfaces that must not drift: meter output, evidence drop-box, ledger record. Read this first. |
+| `references/pricing.md` | The cost formula, why cache traffic dominates a bill, and how to refresh the rate table. |
+| `references/summary.md` | How `last-call` describes a session. The grounding rule, the sections, and why there is no productivity score. |
 | `scripts/meter-session.sh` | Session metering. Emits pure token/time/work counts as JSON. No pricing. |
+| `scripts/cost.sh` | Counts → dollars, using `rates.json`. Separate from the meter because rates change and token counts do not. |
+| `scripts/rates.json` | The rate table. Refreshed from the `claude-api` skill; never edited from memory. |
+| `scripts/openloops.sh` | What the session started and did not finish: uncommitted work, churn hotspots, TODO markers. |
+| `scripts/ledger.sh` | Session history and the baseline that makes ratios mean something. Written by `last-call` only. |
+
+`cost.sh` and `ledger.sh` resolve their own symlinks to find siblings, so they
+work both in place and through the `~/.lastcall/bin` links `install.sh` creates.
 
 ## For the skills that read this
 
