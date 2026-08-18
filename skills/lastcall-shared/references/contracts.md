@@ -193,7 +193,7 @@ Global across projects, with `cwd` as a filterable field. Written by
 {
   "schema":     "lastcall.ledger/1",
   "session_id": "f70c6774-...",
-  "metered_at": "2026-08-17T18:40:00Z",   // idempotency key, with session_id
+  "metered_at": "2026-08-17T18:40:00Z",   // when measured; freshness, not identity
   "cwd":        "/Users/you/code/project",
   "branch":     "feat/thing",
   "started":    "...", "ended": "...", "active_s": 7754,
@@ -218,8 +218,14 @@ Global across projects, with `cwd` as a filterable field. Written by
 
 ### Rules
 
-- **Idempotent.** Re-running `last-call` on a session updates the row matching
-  `(session_id, metered_at)` rather than appending a duplicate.
+- **Idempotent, keyed on `session_id` alone.** Re-running `last-call` on a
+  session *replaces* that session's row rather than appending a duplicate.
+  `metered_at` records when the measurement was taken and breaks ties if
+  duplicates ever appear — it is deliberately **not** part of the key. An
+  earlier draft of this contract keyed on `(session_id, metered_at)`; that is
+  wrong, because `metered_at` changes on every run, so every re-run would
+  append. `last-call` meters twice within a single run (see delegation), so
+  the row must be replaceable in place.
 - **`pricing_source` is required.** A cost figure whose rate table is unknown
   cannot be compared against other rows, and rates change over time.
 - **Absent evidence is recorded as absent**, never as zero completed tasks.
