@@ -1,0 +1,23 @@
+{
+  "_comment": "Rate table for cost computation. See ../references/pricing.md. Refresh from the claude-api skill; do not edit from memory.",
+  "verified_on": "2026-08-17",
+  "source": "claude-api",
+
+  "multipliers": {
+    "cache_read": 0.10,
+    "cache_write_5m": 1.25,
+    "cache_write_1h": 2.00
+  },
+
+  "models": {
+    "claude-opus-5":    { "input": 5.00,  "output": 25.00 },
+    "claude-opus-4-8":  { "input": 5.00,  "output": 25.00 },
+    "claude-opus-4-7":  { "input": 5.00,  "output": 25.00 },
+    "claude-opus-4-6":  { "input": 5.00,  "output": 25.00 },
+    "claude-sonnet-5":  { "input": 3.00,  "output": 15.00,
+                          "promo": { "input": 2.00, "output": 10.00, "until": "2026-08-31" } },
+    "claude-sonnet-4-6":{ "input": 3.00,  "output": 15.00 },
+    "claude-haiku-4-5": { "input": 1.00,  "output": 5.00 },
+    "claude-fable-5":   { "input": 10.00, "output": 50.00 }
+  }
+}

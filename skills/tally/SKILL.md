@@ -6,6 +6,8 @@ argument-hint: "[session-id]"
 allowed-tools:
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/meter-session.sh *)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/meter-session.sh:*)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/cost.sh *)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/cost.sh:*)
 ---
 
 # tally
@@ -46,6 +48,8 @@ Resolve `$METER` to the first of these that exists:
    — a fixed absolute path created by `install.sh`. Use this in Kiro, which has
    no skill-directory variable.
 
+`$COST` resolves the same way, as `cost.sh` in that same directory.
+
 Pass `$ARGUMENTS` through as the session id when the user supplied one.
 
 If the meter exits non-zero, report the stderr verbatim and stop. Do not
@@ -65,16 +69,20 @@ Two fields are easy to misread:
 ### 3. Print one line
 
 ```
-tally · 47m active · 148.5k out · 35.0M cached · 25 files · 7 errors
+tally · 47m active · $4.18 · 148.5k out · 35.0M cached · 25 files · 7 errors
 ```
 
 Rules for the readout:
 
-- Lead with active time. It is the number the user is actually calibrating against.
+- Lead with active time, then cost. Those are the two numbers the user is
+  actually calibrating against.
 - Abbreviate: `k` above 1,000, `M` above 1,000,000, one decimal place.
 - Omit any segment that is zero. A session with no errors should not say `0 errors`.
 - Append ` · N subagents` only when `agents` is non-empty.
 - Singularize counted nouns at 1: `1 subagent`, `1 error`, `1 file`.
+- Round cost to cents for display (`$18.24`). `cost.sh` returns four decimal
+  places on purpose — the ledger sums them and sub-cent precision matters there
+  — but a readout showing `$18.2358` reads as noise.
 
 Expand beyond one line **only** if the user asked for detail. When they do, add
 the per-model/lane token table, the top few churn hotspots from `work.files`
@@ -83,10 +91,25 @@ signature), and the friction counts broken out.
 
 ### 4. Cost
 
-Dollar figures are not yet implemented. Say so plainly — "cost pending" — rather
-than estimating from token counts. Pricing arrives with
-`../lastcall-shared/references/pricing.md`, and until that file exists there is
-no rate table to read. Never guess a rate.
+Pipe the meter's output through the cost script, which lives beside it:
+
+```bash
+"$METER" ${CLAUDE_SESSION_ID} | "$COST"
+```
+
+Read `total_usd` for the headline and `by_bucket` when the user wants detail.
+
+Two things this reports that are easy to miss:
+
+- **`promo_applied`** — a promotional rate was in effect when those tokens were
+  burned. Mention it when true; it explains a figure that won't reproduce later.
+- **`pricing_source`** — which rate table produced the number, as
+  `source@verified-date`.
+
+If the cost script errors with an unknown model, **report the error and give the
+token counts without a dollar figure.** Never substitute a guessed rate — a
+wrong cost figure is worse than no cost figure, because nothing about it looks
+wrong. See `../lastcall-shared/references/pricing.md`.
 
 ## Notes
 
