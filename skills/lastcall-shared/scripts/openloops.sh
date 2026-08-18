@@ -47,7 +47,17 @@ fi
 
 jq -n --argjson m "$METER" --argjson git "$GIT" --argjson dirty "$DIRTY" \
       --argjson todos "$TODOS" --argjson cmin "$CHURN_MIN" --argjson ctop "$CHURN_TOP" '
-  ( $m.work.files // {} | to_entries ) as $files
+  ( $m.session.cwd ) as $cwd
+  # The meter records every edited path, including ones outside the project:
+  # scratchpad temp files, memory files under ~/.claude. Those are not project
+  # work, and a churn line pointing at a temp file wastes the attention of
+  # whoever reads the summary. Trailing slash matters — a bare prefix test
+  # would also match a sibling directory like "<cwd>-other".
+  # No apostrophes in these comments: the whole program is single-quoted in sh.
+  | ( def inproject: . == $cwd or startswith($cwd + "/");
+      $m.work.files // {} | to_entries | map(select(.key | inproject)) ) as $files
+  | ( ($m.work.files // {} | to_entries | length)
+      - ($files | length) ) as $external_files
   | ( $dirty | map(.file) ) as $dirtyfiles
   | {
       git: $git,
@@ -63,11 +73,15 @@ jq -n --argjson m "$METER" --argjson git "$GIT" --argjson dirty "$DIRTY" \
           | map(select(. as $f | $dirtyfiles | any(. as $d | $f | endswith($d)))) ),
 
       # Repeated edits to one file are a struggle signature — precisely the
-      # thing you have forgotten by tomorrow morning.
+      # thing you have forgotten by tomorrow morning. Project files only.
       churn_hotspots:
         ( $files | map({file: .key, edits: .value})
           | map(select(.edits >= $cmin))
           | sort_by(-.edits) | .[0:$ctop] ),
+
+      # How many edited files were outside the project, so the filtering above
+      # is visible rather than silent. Not a hotspot list — just a count.
+      churn_external_files: $external_files,
 
       todos_added: $todos,
 

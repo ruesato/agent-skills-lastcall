@@ -59,6 +59,34 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 - If a required sync or push is blocked, stop and report the exact command and error.
 <!-- END BEADS INTEGRATION -->
 
+## Memory system — overrides the block above
+
+**`memory/MEMORY.md` is the authoritative memory system in this project.** Where
+beads guidance says *"Use `bd remember` … do NOT use MEMORY.md files"*, that line
+does not apply here and must not be followed. `bd remember` is fine for
+bead-scoped notes; it does not replace the memory system.
+
+This section sits **outside** the `BEGIN/END BEADS INTEGRATION` markers on
+purpose, and everything inside them is regenerated. Verified by experiment
+(2026-08-18): a fresh `bd init`, and `bd init --force` on an existing repo, both
+write `do NOT use MEMORY.md files` into that block, and both leave content
+outside it untouched. So this is the only place the correction survives.
+
+Two separate vectors reinstate the conflicting rule, and only one is a file:
+
+1. The managed block above — rewritten by `bd init` / `bd init --force`.
+   (`bd setup claude` does not touch it, and the `bd setup --print` template
+   does not contain the rule, so this is specifically an *init* path.)
+2. **`bd prime` output**, emitted every session by the beads plugin's
+   SessionStart hook. This one is compiled into the binary — there is no file to
+   correct, which is why an in-repo override is the only available fix.
+
+Why it matters: `/last-call`'s memories delegation writes to `memory/MEMORY.md`.
+If the rule takes effect, sessions are told to bypass the exact system the skill
+depends on, and the failure is silent — memories just stop being written.
+
+Run `skills/lastcall-shared/scripts/doctrine-check.sh` to see which vectors are
+currently live. `/last-call` runs it before the memories delegation.
 
 ## Build & Test
 
@@ -112,7 +140,9 @@ sessions, so active time uses gap bucketing.
 ## Conventions & Patterns
 
 - **Memory**: use this environment's `memory/MEMORY.md` system for session memories.
-  The beads block above is task tracking, not a replacement for it.
+  The beads block above is task tracking, not a replacement for it — see
+  "Memory system — overrides the block above", which is the authoritative
+  statement and is placed outside the regenerated markers deliberately.
 - **`/last-call` subsumes the beads "Session Completion" protocol above.** They both
   claim session end, and this is the resolution: the tracker delegation covers steps
   1 and 3 (file issues, update status), the commit delegation covers step 4, and the

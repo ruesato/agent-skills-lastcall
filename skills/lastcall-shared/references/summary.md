@@ -59,7 +59,12 @@ produces. From `openloops.sh`:
   was already there when the session started.
 - **`churn_hotspots`** — files edited three or more times. Repeated editing of
   one file is a struggle signature, and it is exactly what you have forgotten
-  by tomorrow morning.
+  by tomorrow morning. **Project files only**: the meter records every path
+  edited, including scratchpad temp files and memory files under `~/.claude`,
+  and a hotspot line pointing at a temp file spends the reader's attention on
+  nothing. `churn_external_files` carries the count that was filtered out, so
+  the filtering is visible rather than silent — report it only if it is large
+  enough to be interesting.
 - **`todos_added`** — TODO/FIXME/XXX/HACK markers in uncommitted work. A marker
   already committed is a backlog item, not an open loop from this session.
 - **evidence** with status `partial` or `blocked`.

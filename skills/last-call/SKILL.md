@@ -12,13 +12,15 @@ allowed-tools:
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/openloops.sh:*)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/ledger.sh *)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/ledger.sh:*)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/doctrine-check.sh *)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/doctrine-check.sh:*)
 ---
 
 # last-call
 
 Measure the session, say what landed, **ask**, then act.
 
-`allowed-tools` above pre-approves the four metering scripts — all read-only.
+`allowed-tools` above pre-approves the five bundled scripts — all read-only.
 It deliberately does **not** pre-approve `git commit`, `Write`, or the tracker.
 Those still go through the normal permission prompt, so the gate in step 5 is
 backed by a second, independent check rather than being the only thing standing
@@ -42,8 +44,8 @@ delegation, and never let one delegation's failure abort the others.
 
 ## 1. Meter
 
-Resolve `$METER`, `$COST`, `$OPENLOOPS`, and `$LEDGER_SH` to the first location
-that exists:
+Resolve `$METER`, `$COST`, `$OPENLOOPS`, `$LEDGER_SH`, and `$DOCTRINE` to the
+first location that exists:
 
 1. `${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/<script>` — substituted in
    Claude Code, and matches the `allowed-tools` grants above, so it runs without
@@ -155,9 +157,23 @@ re-commit an already-committed change.
 
 ### Memories
 
-Follow the environment's memory system (here, `memory/MEMORY.md` plus one file
-per fact). **Skip silently when nothing durable was learned.** A session that
-taught you nothing worth carrying forward should produce no memory — a
+First, check that nothing is contradicting the memory system:
+
+```bash
+"$DOCTRINE" .
+```
+
+`doctrine-check.sh` looks for guidance saying *"do NOT use MEMORY.md"* in
+`CLAUDE.md`, `AGENTS.md`, and live `bd prime` output. Beads ships that rule, and
+it is correct for a beads-only workspace but wrong wherever `memory/MEMORY.md` is
+authoritative. **If `status` is `conflicts-present`, follow the project's override
+and write the memory anyway** — then mention the conflict in the final readout.
+The failure mode this prevents is silent: told to bypass MEMORY.md, you would
+skip the delegation and report success having written nothing.
+
+Then follow the environment's memory system (here, `memory/MEMORY.md` plus one
+file per fact). **Skip silently when nothing durable was learned.** A session
+that taught you nothing worth carrying forward should produce no memory — a
 manufactured one is worse than an absent one, because it dilutes recall for
 every future session.
 

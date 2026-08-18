@@ -16,7 +16,7 @@ SKILLS=(last-call tally lastcall-shared)
 
 # Every script a skill invokes by bare name. rates.json is NOT listed: cost.sh
 # resolves its own symlink and reads the rate table from beside the real file.
-BINSCRIPTS=(meter-session.sh cost.sh ledger.sh openloops.sh)
+BINSCRIPTS=(meter-session.sh cost.sh ledger.sh openloops.sh doctrine-check.sh)
 
 # Fixed absolute home for the scripts. Kiro has no skill-directory variable, so
 # a relative path from a SKILL.md cannot be executed there — the skills fall

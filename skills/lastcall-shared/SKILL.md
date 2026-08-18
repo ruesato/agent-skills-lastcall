@@ -25,6 +25,7 @@ should invoke it, and both flags above are set to make sure nothing can.
 | `scripts/rates.json` | The rate table. Refreshed from the `claude-api` skill; never edited from memory. |
 | `scripts/openloops.sh` | What the session started and did not finish: uncommitted work, churn hotspots, TODO markers. |
 | `scripts/ledger.sh` | Session history and the baseline that makes ratios mean something. Written by `last-call` only. |
+| `scripts/doctrine-check.sh` | Detects guidance that contradicts the `memory/MEMORY.md` system, in `CLAUDE.md`, `AGENTS.md`, and live `bd prime` output. |
 
 `cost.sh` and `ledger.sh` resolve their own symlinks to find siblings, so they
 work both in place and through the `~/.lastcall/bin` links `install.sh` creates.

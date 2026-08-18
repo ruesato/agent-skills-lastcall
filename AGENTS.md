@@ -129,6 +129,24 @@ bd prime                # Refresh Beads context
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 <!-- END BEADS CODEX SETUP -->
 
+## Memory system — overrides the generated blocks above
+
+**`memory/MEMORY.md` is the authoritative memory system in this project.** Where
+beads guidance says *"Use `bd remember` … do NOT use MEMORY.md files"*, that line
+does not apply here and must not be followed. `bd remember` is fine for
+bead-scoped notes; it does not replace the memory system.
+
+This section sits **outside** the generated markers on purpose. Verified by
+experiment (2026-08-18): `bd init` and `bd init --force` both write
+`do NOT use MEMORY.md files` into the managed block and both leave outside
+content untouched. `bd prime` also emits the rule every session from the beads
+plugin hook, and that copy lives in the binary with no file to correct — so an
+in-repo override outside the markers is the only durable fix.
+
+`/last-call`'s memories delegation writes to `memory/MEMORY.md`; if the rule
+takes effect, memories silently stop being written. Run
+`skills/lastcall-shared/scripts/doctrine-check.sh` to see which vectors are live.
+
 ## Session Completion: `/last-call` subsumes the Beads protocol
 
 Both the "Session Completion" block above and this project's `/last-call` skill
