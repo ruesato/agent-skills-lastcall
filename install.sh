@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — link the last-call skills into a Claude Code or Kiro skills root.
+# install.sh — link the lastcall skills into a Claude Code or Kiro skills root.
 #
 #   ./install.sh                  # auto-detect target(s)
 #   ./install.sh --target claude  # ~/.claude/skills
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SKILLS=(last-call tally lastcall-shared)
+SKILLS=(lastcall tally lastcall-shared)
 
 # Every script a skill invokes by bare name. rates.json is NOT listed: cost.sh
 # resolves its own symlink and reads the rate table from beside the real file.
@@ -81,7 +81,7 @@ if [ "$MODE" = uninstall ]; then
   for s in "${BINSCRIPTS[@]}"; do
     if [ -L "$BIN/$s" ]; then rm "$BIN/$s"; echo "  removed $BIN/$s"; fi
   done
-  echo "Uninstalled. Left ~/.claude/last-call/ledger.jsonl in place."
+  echo "Uninstalled. Left ~/.claude/lastcall/ledger.jsonl in place."
   exit 0
 fi
 

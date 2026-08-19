@@ -81,12 +81,12 @@ Two separate vectors reinstate the conflicting rule, and only one is a file:
    SessionStart hook. This one is compiled into the binary — there is no file to
    correct, which is why an in-repo override is the only available fix.
 
-Why it matters: `/last-call`'s memories delegation writes to `memory/MEMORY.md`.
+Why it matters: `/lastcall`'s memories delegation writes to `memory/MEMORY.md`.
 If the rule takes effect, sessions are told to bypass the exact system the skill
 depends on, and the failure is silent — memories just stop being written.
 
 Run `skills/lastcall-shared/scripts/doctrine-check.sh` to see which vectors are
-currently live. `/last-call` runs it before the memories delegation.
+currently live. `/lastcall` runs it before the memories delegation.
 
 ## Build & Test
 
@@ -108,7 +108,7 @@ IDLE_GAP_S=600 $S/meter-session.sh        # widen the idle threshold
 ```
 
 Set `LASTCALL_LEDGER` to a scratch path while testing so the real baseline at
-`~/.claude/last-call/ledger.jsonl` is not polluted.
+`~/.claude/lastcall/ledger.jsonl` is not polluted.
 
 Verify a change by running the meter across every local transcript and confirming all
 sessions exit 0 — sessions with and without subagents exercise different code paths.
@@ -121,7 +121,7 @@ installed as an empty directory.
 
 Builds two Claude Code skills for closing out agentic work sessions:
 
-- **`/last-call`** — wraps up a session: meters tokens/time/cost, summarizes what
+- **`/lastcall`** — wraps up a session: meters tokens/time/cost, summarizes what
   landed, then delegates to other skills (commit, save memories, report, tracker).
 - **`/tally`** — the mid-session checkpoint. Metering and readout only, no side
   effects, safe to run at any time.
@@ -143,18 +143,18 @@ sessions, so active time uses gap bucketing.
   The beads block above is task tracking, not a replacement for it — see
   "Memory system — overrides the block above", which is the authoritative
   statement and is placed outside the regenerated markers deliberately.
-- **`/last-call` subsumes the beads "Session Completion" protocol above.** They both
+- **`/lastcall` subsumes the beads "Session Completion" protocol above.** They both
   claim session end, and this is the resolution: the tracker delegation covers steps
   1 and 3 (file issues, update status), the commit delegation covers step 4, and the
   summary covers step 5. Step 2 (quality gates) stays manual — a test command that
   exits non-zero is indistinguishable in a transcript from a grep that matched
-  nothing, so test state is never inferred. `last-call`'s user gate is a stronger
+  nothing, so test state is never inferred. `lastcall`'s user gate is a stronger
   guarantee than the conservative profile's "ask first", not a weaker one: it asks
-  per durable action. The overlap is documented in `skills/last-call/SKILL.md`.
+  per durable action. The overlap is documented in `skills/lastcall/SKILL.md`.
 - **Cost math stays out of the meter.** The meter counts tokens; pricing is applied
   downstream from the `claude-api` skill. Never hardcode rates.
 - **Evidence is a drop-box.** External skills contribute work summaries by writing
-  JSON to `<session>/evidence/*.json`. `/last-call` globs that directory, so it needs
+  JSON to `<session>/evidence/*.json`. `/lastcall` globs that directory, so it needs
   no per-skill integration code.
 - **Grounding rule for summaries**: every claim must trace to an artifact — a file
   path, commit SHA, task ID, or test result. Never summarize from conversational

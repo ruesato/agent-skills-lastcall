@@ -1,7 +1,7 @@
 ---
 name: tally
 description: Report what the current session has cost so far — tokens, active time, files touched, and friction — without ending it or changing anything. A read-only checkpoint that is always safe to run.
-when_to_use: Use when the user asks how much this session has cost, how long they have been working, how many tokens have been burned, where things stand, or types /tally. Safe at any point mid-session; it has no side effects and writes nothing. If the user wants to END the session — wrap up, commit, save memories, close out — use the last-call skill instead.
+when_to_use: Use when the user asks how much this session has cost, how long they have been working, how many tokens have been burned, where things stand, or types /tally. Safe at any point mid-session; it has no side effects and writes nothing. If the user wants to END the session — wrap up, commit, save memories, close out — use the lastcall skill instead.
 argument-hint: "[session-id]"
 allowed-tools:
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/meter-session.sh *)
@@ -19,7 +19,7 @@ A checkpoint, not a closeout. Meter the session, print the numbers, stop.
 **This skill has no side effects.** It does not commit, does not write to the
 ledger, does not save memories, does not touch the evidence drop-box, and does
 not modify any file. If the task in front of you needs any of those, you are in
-the wrong skill — use `last-call`.
+the wrong skill — use `lastcall`.
 
 That guarantee is the entire reason `tally` exists separately. Never weaken it.
 
@@ -119,5 +119,5 @@ wrong. See `../lastcall-shared/references/pricing.md`.
 
 Report what the meter measured, nothing more. Do not infer productivity from
 token counts here: burn measures effort, not output, and a session that thrashes
-scores higher than one that succeeds cheaply. Interpretation is `last-call`'s
+scores higher than one that succeeds cheaply. Interpretation is `lastcall`'s
 job, and it needs the evidence drop-box to do it honestly.

@@ -3,7 +3,7 @@
 #
 #   meter-session.sh <id> | openloops.sh
 #
-# The highest-value output of last-call, and the one thing nothing else in the
+# The highest-value output of lastcall, and the one thing nothing else in the
 # toolchain produces. Reports only signals that are definitively checkable —
 # git state and edit counts. Test-failure state is deliberately NOT inferred
 # here; see references/summary.md for why.

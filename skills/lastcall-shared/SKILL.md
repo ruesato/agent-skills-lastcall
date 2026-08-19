@@ -1,6 +1,6 @@
 ---
 name: lastcall-shared
-description: Internal shared contracts and scripts for the last-call and tally skills. Never invoke this directly. It holds the session metering script, the data contracts, and the pricing and summary reference files that those two skills read at runtime.
+description: Internal shared contracts and scripts for the lastcall and tally skills. Never invoke this directly. It holds the session metering script, the data contracts, and the pricing and summary reference files that those two skills read at runtime.
 user-invocable: false
 disable-model-invocation: true
 ---
@@ -10,7 +10,7 @@ disable-model-invocation: true
 Not a skill. A file container.
 
 This directory exists as a skill directory only so that installers which copy
-skill directories carry its files alongside `last-call` and `tally`. Nothing
+skill directories carry its files alongside `lastcall` and `tally`. Nothing
 should invoke it, and both flags above are set to make sure nothing can.
 
 ## Contents
@@ -19,12 +19,12 @@ should invoke it, and both flags above are set to make sure nothing can.
 |---|---|
 | `references/contracts.md` | The three interfaces that must not drift: meter output, evidence drop-box, ledger record. Read this first. |
 | `references/pricing.md` | The cost formula, why cache traffic dominates a bill, and how to refresh the rate table. |
-| `references/summary.md` | How `last-call` describes a session. The grounding rule, the sections, and why there is no productivity score. |
+| `references/summary.md` | How `lastcall` describes a session. The grounding rule, the sections, and why there is no productivity score. |
 | `scripts/meter-session.sh` | Session metering. Emits pure token/time/work counts as JSON. No pricing. |
 | `scripts/cost.sh` | Counts → dollars, using `rates.json`. Separate from the meter because rates change and token counts do not. |
 | `scripts/rates.json` | The rate table. Refreshed from the `claude-api` skill; never edited from memory. |
 | `scripts/openloops.sh` | What the session started and did not finish: uncommitted work, churn hotspots, TODO markers. |
-| `scripts/ledger.sh` | Session history and the baseline that makes ratios mean something. Written by `last-call` only. |
+| `scripts/ledger.sh` | Session history and the baseline that makes ratios mean something. Written by `lastcall` only. |
 | `scripts/doctrine-check.sh` | Detects guidance that contradicts the `memory/MEMORY.md` system, in `CLAUDE.md`, `AGENTS.md`, and live `bd prime` output. |
 
 `cost.sh` and `ledger.sh` resolve their own symlinks to find siblings, so they

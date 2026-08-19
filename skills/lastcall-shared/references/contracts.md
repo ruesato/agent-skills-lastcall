@@ -46,7 +46,7 @@ this: it links the scripts onto `PATH` and the skills invoke them by bare name.
 ## 1. Meter output
 
 Produced by `../lastcall-shared/scripts/meter-session.sh`. Consumed by both
-`tally` and `last-call`.
+`tally` and `lastcall`.
 
 **Pure counts. No pricing.** Rates change; token counts do not. Cost is applied
 downstream from `references/pricing.md` so this contract stays correct.
@@ -106,7 +106,7 @@ Each of these silently corrupts totals if a reimplementation drops it:
 ## 2. Evidence drop-box
 
 **This is the Fathom seam.** Any skill that completes real work contributes here.
-`last-call` globs the directory — it holds no per-skill integration code, so new
+`lastcall` globs the directory — it holds no per-skill integration code, so new
 producers need no changes on the consumer side.
 
 ### Location
@@ -157,7 +157,7 @@ One file per emitting run. Never modify or overwrite another producer's file.
 - Emit at task transitions, not only at session end. A crashed session should
   still leave behind everything that finished before the crash.
 - `artifacts` is how a claim earns trust. **A `completed` task with an empty
-  `artifacts` array is reported by `last-call` as unverified** rather than
+  `artifacts` array is reported by `lastcall` as unverified** rather than
   counted — this is the grounding rule reaching into the contract.
 - Unknown fields are preserved and ignored. Add fields freely; never repurpose
   an existing one.
@@ -181,11 +181,11 @@ sessions give you a baseline to compare against.
 ### Location
 
 ```
-~/.claude/last-call/ledger.jsonl
+~/.claude/lastcall/ledger.jsonl
 ```
 
 Global across projects, with `cwd` as a filterable field. Written by
-`last-call` only — `tally` never writes.
+`lastcall` only — `tally` never writes.
 
 ### Shape
 
@@ -220,13 +220,13 @@ Global across projects, with `cwd` as a filterable field. Written by
 
 ### Rules
 
-- **Idempotent, keyed on `session_id` alone.** Re-running `last-call` on a
+- **Idempotent, keyed on `session_id` alone.** Re-running `lastcall` on a
   session *replaces* that session's row rather than appending a duplicate.
   `metered_at` records when the measurement was taken and breaks ties if
   duplicates ever appear — it is deliberately **not** part of the key. An
   earlier draft of this contract keyed on `(session_id, metered_at)`; that is
   wrong, because `metered_at` changes on every run, so every re-run would
-  append. `last-call` meters twice within a single run (see delegation), so
+  append. `lastcall` meters twice within a single run (see delegation), so
   the row must be replaceable in place.
 - **`pricing_source` is required.** A cost figure whose rate table is unknown
   cannot be compared against other rows, and rates change over time.

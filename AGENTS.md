@@ -143,29 +143,29 @@ content untouched. `bd prime` also emits the rule every session from the beads
 plugin hook, and that copy lives in the binary with no file to correct — so an
 in-repo override outside the markers is the only durable fix.
 
-`/last-call`'s memories delegation writes to `memory/MEMORY.md`; if the rule
+`/lastcall`'s memories delegation writes to `memory/MEMORY.md`; if the rule
 takes effect, memories silently stop being written. Run
 `skills/lastcall-shared/scripts/doctrine-check.sh` to see which vectors are live.
 
-## Session Completion: `/last-call` subsumes the Beads protocol
+## Session Completion: `/lastcall` subsumes the Beads protocol
 
-Both the "Session Completion" block above and this project's `/last-call` skill
-claim session end. `/last-call` is the entry point; the resolution is:
+Both the "Session Completion" block above and this project's `/lastcall` skill
+claim session end. `/lastcall` is the entry point; the resolution is:
 
 | Beads step | Where it happens |
 |---|---|
-| 1. File issues for remaining work | `/last-call` tracker delegation, fed by `openloops.sh` |
+| 1. File issues for remaining work | `/lastcall` tracker delegation, fed by `openloops.sh` |
 | 2. Run quality gates | **Not automated** — see below |
-| 3. Update issue status | `/last-call` tracker delegation |
-| 4. Handle git by profile | `/last-call` commit delegation, behind the user gate |
-| 5. Hand off | The `/last-call` summary |
+| 3. Update issue status | `/lastcall` tracker delegation |
+| 4. Handle git by profile | `/lastcall` commit delegation, behind the user gate |
+| 5. Hand off | The `/lastcall` summary |
 
-`/last-call` gates every durable action on explicit user approval, which is a
+`/lastcall` gates every durable action on explicit user approval, which is a
 stronger guarantee than the conservative profile's "ask first", not a weaker one.
 
 **Quality gates stay manual on purpose.** A test command that exits non-zero is
 indistinguishable in a transcript from a grep that matched nothing, so test state
 is never inferred from exit codes. Report what you actually observed, or nothing.
 
-Full detail in `skills/last-call/SKILL.md`. Note that this section sits outside
+Full detail in `skills/lastcall/SKILL.md`. Note that this section sits outside
 the generated blocks above — `bd setup` rewrites those, so do not move it inside.

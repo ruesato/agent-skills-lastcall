@@ -5,10 +5,10 @@
 #   ledger.sh trend [session-id]                 # baseline, optionally comparing one session
 #   ledger.sh list [--cwd PATH]                  # dump rows
 #
-# Any SHAs passed to `append` land in work.commits — last-call passes the
+# Any SHAs passed to `append` land in work.commits — lastcall passes the
 # commits its delegation actually created.
 #
-# Written by last-call only. tally never writes.
+# Written by lastcall only. tally never writes.
 set -euo pipefail
 
 # Resolve through symlinks — see cost.sh for why.
@@ -18,7 +18,7 @@ while [ -L "$SELF" ]; do
   case "$target" in /*) SELF="$target" ;; *) SELF="$(dirname "$SELF")/$target" ;; esac
 done
 HERE="$(cd "$(dirname "$SELF")" && pwd)"
-LEDGER="${LASTCALL_LEDGER:-$HOME/.claude/last-call/ledger.jsonl}"
+LEDGER="${LASTCALL_LEDGER:-$HOME/.claude/lastcall/ledger.jsonl}"
 PROJECTS="${CLAUDE_PROJECTS:-$HOME/.claude/projects}"
 COST="$HERE/cost.sh"
 
@@ -61,7 +61,7 @@ evidence_for() {
 
 cmd_append() {
   local meter cost sid cwd ev row commits
-  # Commits created by last-call's delegation, if any. Passed in rather than
+  # Commits created by lastcall's delegation, if any. Passed in rather than
   # derived: only the caller knows which commits belong to this session.
   commits="$(printf '%s\n' "$@" | jq -Rs 'split("\n") | map(select(length > 0))')"
   meter="$(cat)"

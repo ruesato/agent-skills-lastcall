@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # doctrine-check.sh — detect instructions that contradict the memory system
-# last-call depends on.
+# lastcall depends on.
 #
 #   doctrine-check.sh [project-dir]     # defaults to $PWD
 #
 # Why this exists: beads ships guidance that says "Do NOT use MEMORY.md files".
 # That instruction is correct for a beads-only workspace and wrong here, where
-# `memory/MEMORY.md` is authoritative and last-call's memories delegation
-# writes to it. If that rule takes effect, last-call is told to bypass exactly
+# `memory/MEMORY.md` is authoritative and lastcall's memories delegation
+# writes to it. If that rule takes effect, lastcall is told to bypass exactly
 # the system it depends on, and the failure is silent — memories simply stop
 # being written, with no error.
 #

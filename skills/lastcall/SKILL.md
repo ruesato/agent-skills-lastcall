@@ -1,7 +1,7 @@
 ---
-name: last-call
+name: lastcall
 description: Close out a work session — meter what it cost, summarize what actually landed and what is still open, then offer to commit, save memories, publish a report, and update the tracker. Every durable action happens only after you approve it.
-when_to_use: Use when the user is ending a session — "let's wrap up", "close this out", "I'm done for the day", "call it here" — or types /last-call. For a mid-session checkpoint with no side effects, use the tally skill instead; tally measures, last-call measures and then acts.
+when_to_use: Use when the user is ending a session — "let's wrap up", "close this out", "I'm done for the day", "call it here" — or types /lastcall. For a mid-session checkpoint with no side effects, use the tally skill instead; tally measures, lastcall measures and then acts.
 argument-hint: "[session-id]"
 allowed-tools:
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/meter-session.sh *)
@@ -16,7 +16,7 @@ allowed-tools:
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/doctrine-check.sh:*)
 ---
 
-# last-call
+# lastcall
 
 Measure the session, say what landed, **ask**, then act.
 
@@ -154,7 +154,7 @@ end up with a half-staged tree the user did not ask for.
   append `Closes …` listing them.
 - Capture the resulting SHA — step 7 puts it in the ledger row.
 
-**Re-running `last-call` must not double-commit.** The precondition is a dirty
+**Re-running `lastcall` must not double-commit.** The precondition is a dirty
 tree, checked fresh in step 3. After a successful commit the tree is clean, so a
 second run does not offer the delegation at all. Do not "helpfully" amend or
 re-commit an already-committed change.
@@ -207,14 +207,14 @@ printf '%s' "$M2" | "$LEDGER_SH" append <sha> ...
 ```
 
 Why twice: the first reading was taken before this skill did its own work, so it
-understates the session by exactly the amount `last-call` cost. The second
+understates the session by exactly the amount `lastcall` cost. The second
 reading is what the ledger should carry. It is a jq pass over a local file — the
 second run is free.
 
 Pass any SHAs the commit delegation produced; they land in `work.commits`.
 
 The ledger is **keyed on `session_id` alone** and replaces that session's row in
-place, so re-running never appends a duplicate. Written by `last-call` only —
+place, so re-running never appends a duplicate. Written by `lastcall` only —
 `tally` never writes.
 
 Note: if the gate involved a free-text reply, the `allowed-tools` grant has
@@ -242,7 +242,7 @@ overstates itself defeats its own purpose.
 ## Relationship to the beads session-close protocol
 
 This project's `CLAUDE.md` carries a beads-managed **Session Completion**
-protocol that also claims session end. They do not conflict; `last-call`
+protocol that also claims session end. They do not conflict; `lastcall`
 subsumes it, with one carve-out:
 
 | Beads step | Here |

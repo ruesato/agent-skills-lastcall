@@ -1,6 +1,6 @@
 # Summary
 
-How `last-call` describes a session. This is the read-only half — everything
+How `lastcall` describes a session. This is the read-only half — everything
 before the user gate.
 
 ---
