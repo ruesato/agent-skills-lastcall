@@ -170,6 +170,13 @@ sessions, so active time uses gap bucketing.
 - **Grounding rule for summaries**: every claim must trace to an artifact — a file
   path, commit SHA, task ID, or test result. Never summarize from conversational
   narrative alone; transcripts are full of intentions that never landed.
-- Two jq traps this codebase has already hit: `add` on objects *overwrites* duplicate
-  keys rather than summing them, and `fromdateiso8601` rejects the milliseconds these
-  timestamps carry.
+- Three jq traps this codebase has already hit:
+  - `add` on objects *overwrites* duplicate keys rather than summing them.
+  - `fromdateiso8601` rejects the milliseconds these timestamps carry.
+  - An apostrophe inside a **comment** in a single-quoted jq program ends the shell
+    string early. Write "the row" and "the reader", never "the row's" or "the
+    reader's". The damage lands far from the typo: in `openloops.sh` it surfaced as
+    a jq compile error, in `ledger.sh` as a bash syntax error on an unrelated line
+    ~110 lines below the edit. `bash -n` catches the second form instantly, and
+    `verify.sh:36` runs it over every script. Both files carry an inline warning at
+    the top of their jq programs — keep it there.

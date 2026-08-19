@@ -192,10 +192,33 @@ the artifact is just its nicest form. Never let a publishing failure lose it.
 
 ### Tracker
 
-Close or update the issues the evidence says moved, and file new issues for the
-open loops from step 3. **On an API failure, report it and continue** — the
-tracker is downstream of the work, and a failed sync is a nuisance, not a reason
-to abandon the wrap-up. Print what you would have filed so nothing is lost.
+File new issues for the open loops from step 3, and update the issues the
+evidence says moved.
+
+**The evidence `status` is the signal for which of those an entry is. Read it
+before touching anything.** A producer that emits evidence is a skill that
+completes real work, and it has usually already updated the tracker itself
+before handing off. Re-closing its work is a double-touch: it churns the issue
+history, and it can reopen-then-close or clobber a status the producer set
+deliberately.
+
+| Status | What the tracker delegation does |
+|---|---|
+| `completed` | **Nothing.** The producer already moved it. Do not close it again. |
+| `partial` | File or update an issue for the remaining work. |
+| `blocked` | File or update an issue, naming the external dependency. |
+| `abandoned` | **Nothing.** Deliberately dropped is not an open loop, and not a failure. |
+
+Two cases that look like exceptions and are not. A `completed` task with an
+empty `artifacts` array is reported as **unverified** (contract 2), so it is not
+grounds for closing anything — an unverified claim is the weakest possible
+reason to touch a tracker. And when no evidence exists at all, there is nothing
+to reconcile: file the open loops from `openloops.sh` and leave existing issues
+alone, rather than inferring status from the transcript.
+
+**On an API failure, report it and continue** — the tracker is downstream of the
+work, and a failed sync is a nuisance, not a reason to abandon the wrap-up.
+Print what you would have filed so nothing is lost.
 
 ## 7. Re-meter, then write the ledger
 
