@@ -73,6 +73,10 @@ agents_json() {
 
 # Per-file metering. $lane distinguishes main-thread from subagent turns, which
 # matters because the two use different cache TTLs and so price differently.
+#
+# WARNING: no apostrophes in these comments. This jq program is a single-quoted
+# shell string, and one apostrophe ends it early — the resulting error lands far
+# from the typo. Write "the row", never "the row" with a possessive s.
 meter_file() {
   jq -s --arg lane "$2" --argjson gap "$IDLE_GAP_S" '
     # Streaming emits one entry per chunk sharing a requestId. Collapsing each
@@ -95,6 +99,13 @@ meter_file() {
                | ($ts[$i] - $ts[$i-1]) | select(. <= $gap) ] | add // 0 end
       ) as $active
 
+    # Claude Code writes one turn_duration record per COMPLETED user turn. It is
+    # its own measure of how long the agent was busy, with no idle heuristic in
+    # it — but the turn in flight has not been written yet, so this undercounts
+    # a session metered mid-turn and is 0 for a session that has never finished
+    # a turn. Reported beside $active, never instead of it.
+    | ( map(select(.type == "system" and .subtype == "turn_duration")) ) as $td
+
     | ( map(select(.type == "assistant") | .message.content[]?
             | select(.type == "tool_use")) ) as $tools
 
@@ -103,8 +114,42 @@ meter_file() {
         cwd:     (map(.cwd // empty)       | first),
         branch:  (map(.gitBranch // empty) | last),
         first_ts: ($ts | first), last_ts: ($ts | last), active_s: $active,
-        usage: ( $turns | group_by(.message.model) | map({
-                   model: .[0].message.model,
+        agent_s:     (($td | map(.durationMs) | add // 0) / 1000),
+        agent_turns: ($td | length),
+        # Grouped by the dimensions that change what a request BILLS at. speed
+        # (fast mode) and service_tier (priority, batch) both do; collapsing
+        # them would price a fast-mode session at standard rates and leave no
+        # trace that it happened. Kept as recorded, so null means unrecorded
+        # rather than standard.
+        usage: ( $turns
+                 | group_by([.message.model, .message.usage.speed, .message.usage.service_tier])
+                 | map({
+                   model:        .[0].message.model,
+                   speed:        .[0].message.usage.speed,
+                   service_tier: .[0].message.usage.service_tier,
+                   turns: length,
+                   input:      (map(.message.usage.input_tokens            // 0) | add),
+                   output:     (map(.message.usage.output_tokens           // 0) | add),
+                   cache_read: (map(.message.usage.cache_read_input_tokens // 0) | add),
+                   cache_w_5m: (map(.message.usage.cache_creation.ephemeral_5m_input_tokens // 0) | add),
+                   cache_w_1h: (map(.message.usage.cache_creation.ephemeral_1h_input_tokens // 0) | add),
+                   # Thinking is a SUBSET of output, not another bucket. Never
+                   # add it to a total; it says how much of the output was
+                   # reasoning rather than reply.
+                   thinking:   (map(.message.usage.output_tokens_details.thinking_tokens // 0) | add),
+                   # Server-side tools carry per-request spend, so these counts
+                   # are the only trace of it anywhere in the transcript.
+                   web_search: (map(.message.usage.server_tool_use.web_search_requests // 0) | add),
+                   web_fetch:  (map(.message.usage.server_tool_use.web_fetch_requests  // 0) | add),
+                   efforts: (group_by(.effort) | map({ (.[0].effort // "unset"): length }) | add // {})
+                 }) ),
+        # Per-turn skill and plugin attribution, written by Claude Code itself.
+        # Lane is deliberately absent: pricing reads the cache buckets, which
+        # are already split, so a skill row prices correctly without it.
+        skills: ( $turns | group_by([.attributionSkill, .message.model]) | map({
+                   skill:  .[0].attributionSkill,
+                   plugin: .[0].attributionPlugin,
+                   model:  .[0].message.model,
                    turns: length,
                    input:      (map(.message.usage.input_tokens            // 0) | add),
                    output:     (map(.message.usage.output_tokens           // 0) | add),
@@ -130,13 +175,19 @@ meter_file() {
 
 { meter_file "$MAIN" main
   # The trailing "true" matters: with pipefail, a session that spawned no
-  # subagents would otherwise leave this block's status at 1 and fail the
+  # subagents would otherwise leave this block-s status at 1 and fail the
   # pipeline despite jq having produced correct output.
   for f in "${SUBS[@]:-}"; do
     [ -f "$f" ] && meter_file "$f" subagent
   done
   true
 } | jq -s --arg sid "$SID" --argjson agents "$(agents_json)" '
+    # Merge a list of {key: count} maps by SUMMING. Object "+" overwrites
+    # duplicate keys rather than summing them, which is the trap this exists
+    # to avoid — see CLAUDE.md.
+    def sum_maps: [ .[] | to_entries[] ] | group_by(.key)
+                  | map({ (.[0].key): (map(.value) | add) }) | add // {};
+
     { session: {
         id: $sid,
         cwd:    (map(.cwd    | select(.)) | first),
@@ -146,27 +197,47 @@ meter_file() {
         wall_s:  ((map(.last_ts) | max) - (map(.first_ts) | min)),
         # Main-thread active time only: subagents run concurrently, so adding
         # their spans would double-count the same minutes.
-        active_s: (map(select(.lane=="main") | .active_s) | add // 0)
+        active_s: (map(select(.lane=="main") | .active_s) | add // 0),
+        # Native agent-busy time. Only the main thread emits turn_duration, and
+        # only for turns that have ENDED, so this is a floor: a session metered
+        # mid-turn is missing the turn being metered.
+        agent_s:     (map(select(.lane=="main") | .agent_s)     | add // 0),
+        agent_turns: (map(select(.lane=="main") | .agent_turns) | add // 0)
       },
-      # Grouped by (model, lane) because the two lanes use different cache TTLs.
+      # Grouped by (model, lane, speed, service_tier). The last two are pricing
+      # dimensions; the lane split is there because main threads and subagents
+      # use different cache TTLs.
       tokens: ( map(.lane as $l | .usage[] | . + {lane: $l})
-                | group_by([.model, .lane]) | map({
+                | group_by([.model, .lane, .speed, .service_tier]) | map({
                     model: .[0].model, lane: .[0].lane,
+                    speed: .[0].speed, service_tier: .[0].service_tier,
+                    turns:      (map(.turns)      | add),
+                    input:      (map(.input)      | add),
+                    output:     (map(.output)     | add),
+                    cache_read: (map(.cache_read) | add),
+                    cache_w_5m: (map(.cache_w_5m) | add),
+                    cache_w_1h: (map(.cache_w_1h) | add),
+                    thinking:   (map(.thinking)   | add),
+                    web_search: (map(.web_search) | add),
+                    web_fetch:  (map(.web_fetch)  | add),
+                    efforts:    (map(.efforts) | sum_maps)
+                  }) ),
+      agents: $agents,
+      work: {
+        tools: (map(.tools) | sum_maps),
+        files: (map(.files) | sum_maps),
+        # Attribution is absent on plain conversational turns, which group under
+        # a null skill. That null row is the unattributed remainder, and dropping
+        # it would make the parts stop summing to the whole.
+        skills: ( map(.skills[]) | group_by([.skill, .model]) | map({
+                    skill: .[0].skill, plugin: .[0].plugin, model: .[0].model,
                     turns:      (map(.turns)      | add),
                     input:      (map(.input)      | add),
                     output:     (map(.output)     | add),
                     cache_read: (map(.cache_read) | add),
                     cache_w_5m: (map(.cache_w_5m) | add),
                     cache_w_1h: (map(.cache_w_1h) | add)
-                  }) ),
-      agents: $agents,
-      # NB: object "+" overwrites duplicate keys rather than summing them, so
-      # merging per-lane counts has to go through entries and add explicitly.
-      work: {
-        tools: (map(.tools) | [.[] | to_entries[]] | group_by(.key)
-                | map({ (.[0].key): (map(.value) | add) }) | add // {}),
-        files: (map(.files) | [.[] | to_entries[]] | group_by(.key)
-                | map({ (.[0].key): (map(.value) | add) }) | add // {})
+                  }) | sort_by(-(.output)) )
       },
       friction: {
         tool_errors: (map(.friction.tool_errors) | add),

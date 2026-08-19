@@ -128,6 +128,17 @@ shifts findings, re-run `bin/scan-skills.sh`, review what resurfaced at its
 source location, and re-baseline. Never suppress a finding you have not
 understood.
 
+Two behaviours of that gate, learned the hard way and cheap to re-hit:
+a fingerprint is invalidated by **any** edit to the file it lives in, not only
+by an edit to the excused paragraph — so re-baselining after an unrelated
+change is expected, and the re-review is the point. And LP3 ("no declared
+permissions") fires on *prose inside a script*: the phrase "requests billed per
+request" in a shell comment was enough to flag `lastcall-shared`, a
+non-invocable container that declares no tools because it can invoke none.
+`allowed-tools: []` does not satisfy it. Rewording ("per-request tool spend")
+cleared it, which is better than suppressing a whole-skill least-privilege rule
+that would then mask a real finding later.
+
 ## Architecture Overview
 
 Builds two Claude Code skills for closing out agentic work sessions:
@@ -147,6 +158,24 @@ streaming duplicates assistant entries (dedupe by `requestId`); subagent turns l
 separate `<session>/subagents/*.jsonl` files; main threads use 1h cache TTL while
 subagents use 5m, which price differently; wall-clock time is meaningless for resumed
 sessions, so active time uses gap bucketing.
+
+Native signals the meter reads straight out of the transcript, rather than
+inferring (all verified against real transcripts, not assumed):
+`system`/`turn_duration` records give agent-busy time per completed turn
+(`session.agent_s`) with no idle heuristic — but they are written at turn *end*,
+so the turn in flight is always missing; `attributionSkill` / `attributionPlugin`
+attribute spend to the skill that caused it (`work.skills`, `cost.by_skill`);
+`usage.speed` and `usage.service_tier` are pricing dimensions and therefore part
+of the token row key; `usage.output_tokens_details.thinking_tokens` is a subset
+of output, never a sixth bucket; `usage.server_tool_use` counts requests that
+bill per request, which no token bucket can express, so `cost.sh` reports them
+under `caveats` instead of pretending the total is complete.
+
+**Transcripts are not a documented public contract.** These fields can move
+without notice, so every one of them is read with a `//` fallback and its
+absence means *unmeasured*, never zero. There is no `costUSD` in current
+transcripts (verified across every local file) — computing cost from tokens is
+the only local option, not a workaround.
 
 ## Conventions & Patterns
 

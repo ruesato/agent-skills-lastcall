@@ -63,9 +63,20 @@ Two fields are easy to misread:
 
 - **`session.wall_s` is not how long the user worked.** A resumed session spans
   days. Always report `session.active_s`.
-- **`tokens` is one row per (model, lane).** Sum across rows for totals, and
-  keep `lane: "subagent"` visible when it is a meaningful share — subagent cost
-  is invisible to the user otherwise.
+- **`session.agent_s` is not the same number as `active_s`.** It is Claude Code
+  own sum of completed turn durations — agent busy time, with no idle threshold
+  in it — while `active_s` is how long the *user* was engaged. Expect `agent_s`
+  to be the smaller of the two. It is a floor: the turn in flight has not been
+  recorded yet, so mid-session it always lags, and it is `0` before the first
+  turn completes. Report it only alongside `active_s`, never instead of it, and
+  omit it when `agent_turns` is 0.
+- **`tokens` is one row per (model, lane, speed, service_tier).** Sum across
+  rows for totals, and keep `lane: "subagent"` visible when it is a meaningful
+  share — subagent cost is invisible to the user otherwise. A `speed` or
+  `service_tier` other than `"standard"` means the row is not priced correctly;
+  `cost.sh` flags it in `caveats`.
+- **`tokens[].thinking` is part of `output`, not an addition to it.** Report it
+  as a share ("of which 63.8k thinking"), never as another bucket.
 
 ### 3. Print one line
 
@@ -109,6 +120,15 @@ Two things this reports that are easy to miss:
   case, and "partly promotional" is the accurate thing to say.
 - **`pricing_source`** — which rate table produced the number, as
   `source@verified-date`.
+- **`caveats`** — a non-empty array means `total_usd` is known to understate.
+  **Always surface it**, in the one-line readout if need be: a figure that is
+  quietly missing per-request server-tool spend, or that priced a fast-mode
+  session at standard rates, is exactly the kind of wrong number that looks
+  right.
+
+When the user asks for detail, `by_skill` answers "what did each skill cost" —
+including what this skill costs to run. The `skill: null` row is the
+unattributed remainder, so label it as such rather than dropping it.
 
 If the cost script errors with an unknown model, **report the error and give the
 token counts without a dollar figure.** Never substitute a guessed rate — a

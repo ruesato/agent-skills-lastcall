@@ -20,47 +20,68 @@ HERE="$(cd "$(dirname "$SELF")" && pwd)"
 RATES="${LASTCALL_RATES:-$HERE/rates.json}"
 [ -f "$RATES" ] || { echo "no rate table at $RATES" >&2; exit 1; }
 
+# WARNING: no apostrophes in the comments below. This jq program is a
+# single-quoted shell string, and one apostrophe ends it early — the error then
+# lands far from the typo. Write "the row", never a possessive.
 jq -s --slurpfile r "$RATES" '
+  # Transcripts carry dated model ids (claude-haiku-4-5-20251001); the rate
+  # table is keyed on the bare alias.
+  def norm: sub("-20[0-9]{6}$"; "");
+
+  # Effective rate for a model id at a point in time. Token spend is dated: a
+  # rate that was promotional when the tokens were burned still applies, even
+  # if the promo has since lapsed.
+  def eff($rates; $when):
+    . as $model
+    | ($rates.models[$model|norm]) as $rate
+    | if $rate == null then
+        # Fail loudly. A guessed rate is worse than no number at all, because
+        # it silently poisons every ledger comparison downstream.
+        error("unknown model \($model) (normalized: \($model|norm)) — add it to rates.json from the claude-api skill")
+      else . end
+    | if $rate.promo != null and $when <= ($rate.promo.until + "T23:59:59Z")
+      then { input: $rate.promo.input, output: $rate.promo.output, promo: true }
+      else { input: $rate.input,       output: $rate.output,       promo: false } end;
+
+  # Dollars for one token row, given its rate and the structural multipliers.
+  def usd($p; $mult):
+    ( (.input      // 0) * $p.input
+    + (.cache_read // 0) * $p.input * $mult.cache_read
+    + (.cache_w_5m // 0) * $p.input * $mult.cache_write_5m
+    + (.cache_w_1h // 0) * $p.input * $mult.cache_write_1h
+    + (.output     // 0) * $p.output
+    ) / 1000000;
+
+  def r4: . * 10000 | round / 10000;
+
   .[0] as $m | $r[0] as $rates
-
-  # Token spend is dated: a rate that was promotional when the tokens were
-  # burned still applies, even if the promo has since lapsed. Bill against the
-  # session end date, not today.
   | ($m.session.ended // "1970-01-01") as $when
-
   | ($rates.multipliers) as $mult
-  | ($m.tokens | map(
-      # Transcripts carry dated model ids (claude-haiku-4-5-20251001); the rate
-      # table is keyed on the bare alias.
-      ( .model
-        | sub("-20[0-9]{6}$"; "")
-      ) as $key
-      | ($rates.models[$key]) as $rate
-      | if $rate == null then
-          # Fail loudly. A guessed rate is worse than no number at all,
-          # because it silently poisons every ledger comparison downstream.
-          error("unknown model \(.model) (normalized: \($key)) — add it to rates.json from the claude-api skill")
-        else . end
 
-      # Promotional rates apply only while the promo is live.
-      | (if $rate.promo != null and $when <= ($rate.promo.until + "T23:59:59Z")
-         then { input: $rate.promo.input, output: $rate.promo.output, promo: true }
-         else { input: $rate.input, output: $rate.output, promo: false } end) as $p
+  | ($m.tokens | map(. + { p: (.model | eff($rates; $when)) })) as $priced
 
-      | . + {
-          usd: ( ( .input      * $p.input
-                 + .cache_read * $p.input * $mult.cache_read
-                 + .cache_w_5m * $p.input * $mult.cache_write_5m
-                 + .cache_w_1h * $p.input * $mult.cache_write_1h
-                 + .output     * $p.output
-                 ) / 1000000 ),
-          promo_applied: $p.promo
-        }
-    )) as $priced
+  # Skill attribution comes from the transcript, so it prices with the same
+  # table. Rows lacking the pricing dimensions price at list rates.
+  | (($m.work.skills // []) | map(. + { p: (.model | eff($rates; $when)) })) as $skilled
+
+  # Anything that makes this total an understatement or an approximation says
+  # so here, rather than being folded silently into the number.
+  | ( [ $m.tokens[]
+        | select((.speed // "standard") != "standard"
+                 or (.service_tier // "standard") != "standard")
+        | "\(.model) (\(.lane)): speed=\(.speed // "unrecorded") service_tier=\(.service_tier // "unrecorded") — priced at standard rates; rates.json has no tier axis"
+      ]
+      + ( ([ $m.tokens[] | .web_search // 0 ] | add // 0)
+          | if . > 0 then
+              ["\(.) web search calls carry per-request spend that no token bucket expresses — NOT in this total"]
+            else [] end )
+    ) as $caveats
 
   | {
-      total_usd: ($priced | map(.usd) | add // 0 | .*10000 | round / 10000),
-      by_model:  ($priced | map({model, lane, usd: (.usd*10000|round/10000), promo_applied})),
+      total_usd: ($priced | map(usd(.p; $mult)) | add // 0 | r4),
+      by_model:  ($priced | map({ model, lane, speed, service_tier,
+                                  usd: (usd(.p; $mult) | r4),
+                                  promo_applied: .p.promo })),
 
       # Rollup, because consumers read the top level. Without this the key was
       # absent entirely, so `.promo_applied` came back null on a session that
@@ -68,16 +89,37 @@ jq -s --slurpfile r "$RATES" '
       # True when ANY lane billed at a promo: a mixed session is the common
       # case, and promo_models says which, so "partly promotional" is
       # reportable instead of collapsing to a misleading yes/no.
-      promo_applied: ($priced | map(.promo_applied) | any),
-      promo_models:  ($priced | map(select(.promo_applied) | .model) | unique),
+      promo_applied: ($priced | map(.p.promo) | any),
+      promo_models:  ($priced | map(select(.p.promo) | .model) | unique),
 
       # Where the money actually went, in dollars rather than tokens.
       by_bucket: {
-        input:       ($priced | map(.input      * (if .promo_applied then $rates.models[(.model|sub("-20[0-9]{6}$";""))].promo.input else $rates.models[(.model|sub("-20[0-9]{6}$";""))].input end)) | add // 0 | . / 1000000),
-        cache_read:  ($priced | map(.cache_read * (if .promo_applied then $rates.models[(.model|sub("-20[0-9]{6}$";""))].promo.input else $rates.models[(.model|sub("-20[0-9]{6}$";""))].input end) * $mult.cache_read) | add // 0 | . / 1000000),
-        cache_write: ($priced | map((.cache_w_5m * $mult.cache_write_5m + .cache_w_1h * $mult.cache_write_1h) * (if .promo_applied then $rates.models[(.model|sub("-20[0-9]{6}$";""))].promo.input else $rates.models[(.model|sub("-20[0-9]{6}$";""))].input end)) | add // 0 | . / 1000000),
-        output:      ($priced | map(.output     * (if .promo_applied then $rates.models[(.model|sub("-20[0-9]{6}$";""))].promo.output else $rates.models[(.model|sub("-20[0-9]{6}$";""))].output end)) | add // 0 | . / 1000000)
-      } | with_entries(.value |= (.*10000|round/10000)),
+        input:       ($priced | map((.input      // 0) * .p.input) | add // 0),
+        cache_read:  ($priced | map((.cache_read // 0) * .p.input * $mult.cache_read) | add // 0),
+        cache_write: ($priced | map(((.cache_w_5m // 0) * $mult.cache_write_5m
+                                   + (.cache_w_1h // 0) * $mult.cache_write_1h) * .p.input) | add // 0),
+        output:      ($priced | map((.output     // 0) * .p.output) | add // 0)
+      } | with_entries(.value |= (. / 1000000 | r4)),
+
+      # What each skill cost. The null skill is the unattributed remainder —
+      # kept, because without it the parts stop summing to the whole.
+      by_skill: ($skilled
+                 | map({ skill, plugin, model, turns, usd: (usd(.p; $mult) | r4) })
+                 | sort_by(-.usd)),
+
+      # Reasoning share of output. A subset of output spend, never an addition
+      # to it — reported so a jump in output tokens can be told apart from a
+      # jump in thinking.
+      thinking_tokens: ([ $m.tokens[] | .thinking // 0 ] | add // 0),
+
+      # Per-request tool spend. No token bucket can express it, so this
+      # total does not price it — see caveats.
+      server_tools: {
+        web_search_requests: ([ $m.tokens[] | .web_search // 0 ] | add // 0),
+        web_fetch_requests:  ([ $m.tokens[] | .web_fetch  // 0 ] | add // 0)
+      },
+
+      caveats: $caveats,
 
       # Required by the ledger contract: a cost figure whose rate table is
       # unknown cannot be compared against other rows.

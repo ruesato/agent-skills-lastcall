@@ -11,7 +11,11 @@
 #
 # Why fingerprints rather than glob `rules`: a fingerprint binds to the actual
 # decoded source text, so editing the excused paragraph invalidates the
-# suppression and the finding comes back. A glob rule would keep suppressing
+# suppression and the finding comes back. Observed 2026-08-19: the binding is
+# per FILE, not per paragraph — edits elsewhere in skills/tally/SKILL.md
+# invalidated the RA2 hash while the excused paragraph itself was untouched.
+# That is more conservative than advertised, not less: it forces a re-read on
+# any edit to the file, which is why the reason below records the re-review. A glob rule would keep suppressing
 # whatever new wording still matched it. SkillSpector's own guidance reserves
 # `rules` for deliberate, tightly-scoped policy suppressions precisely because
 # "a broad rule can hide newly malicious content". This repo has no such policy
@@ -25,7 +29,7 @@ version: 2
 scanner_version: 2.9.5
 rules: []
 fingerprints:
-- hash: sha256:1334422e9b4cd065d879c501eaedca565ddaf4e69f6565aa56b343dc2470245b
+- hash: sha256:9ae64581bd429c578d86c56d2868adc49e52c46e317823bf914a23eb6c7cd0a7
   rule_id: RA2
   file: SKILL.md
   reason: >-
@@ -35,7 +39,10 @@ fingerprints:
     ledger, does not save memories, does not touch the evidence drop-box, and
     does not modify any file." The static pattern keys on the
     ledger/memories/state vocabulary and cannot read the negation, so it
-    flagged the guarantee as the violation (confidence 0.6). Verified at
+    flagged the guarantee as the violation (confidence 0.6).
+    Re-reviewed 2026-08-19 after unrelated edits to this file (the
+    native-metering readout) invalidated the previous hash: same rule, same
+    paragraph, same confidence, paragraph text unchanged. Verified at
     source: tally's SKILL.md defines no write path of any kind, and
     skills/lastcall-shared/scripts/ledger.sh:11 states "Written by lastcall
     only. tally never writes." Writing is the difference between the two

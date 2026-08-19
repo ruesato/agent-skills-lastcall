@@ -78,13 +78,25 @@ cmd_append() {
       cwd: $m.session.cwd, branch: $m.session.branch,
       started: $m.session.started, ended: $m.session.ended,
       active_s: $m.session.active_s,
+      # Claude Code own measure of agent-busy time, beside the gap-bucketed
+      # figure. Absent on rows written before it existed, so it is recorded
+      # but never used in trend math — a null there means unmeasured, not zero.
+      agent_s: $m.session.agent_s,
       # promo state is recorded per row because a promo expiry moves the cost
       # of every later row without any behavior changing. Without it, a trend
       # spanning the boundary shows a step change that cannot be attributed.
       # No apostrophes here: the whole program is single-quoted in sh.
       cost: { usd: $c.total_usd, by_model: $c.by_model,
               pricing_source: $c.pricing_source,
-              promo_applied: $c.promo_applied, promo_models: $c.promo_models },
+              promo_applied: $c.promo_applied, promo_models: $c.promo_models,
+              # What each skill cost, from the attribution Claude Code writes
+              # into the transcript. Sums to usd, including the null row that
+              # holds everything unattributed.
+              by_skill: $c.by_skill,
+              # Anything that makes usd an understatement — an unpriceable
+              # service tier, or per-request tool spend this table cannot
+              # price. A row with caveats is not comparable to one without.
+              caveats: $c.caveats },
       tokens: $m.tokens,
       work: { tool_calls: ($m.work.tools | to_entries | map(.value) | add // 0),
               files_changed: ($m.work.files | length),

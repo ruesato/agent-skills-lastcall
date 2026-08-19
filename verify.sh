@@ -60,6 +60,12 @@ for f in "$PROJECTS"/*/*.jsonl; do
   ok
   [ "$(printf '%s' "$out" | jq '.agents | length')" -gt 0 ] && withsub=$((withsub+1))
 
+  # Native agent-busy time. Always present, always a number, and it cannot
+  # exceed wall clock — it is a sum of completed turns inside that span.
+  if printf '%s' "$out" | jq -e '.session.agent_s | type == "number"' >/dev/null 2>&1 \
+     && printf '%s' "$out" | jq -e '.session.agent_s <= (.session.wall_s + 1)' >/dev/null 2>&1
+  then ok; else bad "meter $sid: agent_s missing or exceeds wall_s"; fi
+
   c="$(printf '%s' "$out" | "$S/cost.sh" 2>/dev/null)"
   if printf '%s' "$c" | jq -e '.total_usd >= 0' >/dev/null 2>&1; then ok
   else bad "cost $sid"; fi
@@ -67,6 +73,13 @@ for f in "$PROJECTS"/*/*.jsonl; do
   # reading a missing key silently dropped the promotional-pricing signal.
   if printf '%s' "$c" | jq -e '.promo_applied | type == "boolean"' >/dev/null 2>&1; then ok
   else bad "cost $sid: promo_applied is not a boolean"; fi
+
+  # Skill attribution partitions the same spend, so the parts must sum to the
+  # whole. The null skill row is the unattributed remainder and carries the
+  # difference; dropping it is what would break this.
+  if printf '%s' "$c" | jq -e '(([.by_skill[].usd] | add // 0) - .total_usd | fabs) < 0.01' \
+       >/dev/null 2>&1; then ok
+  else bad "cost $sid: by_skill does not sum to total_usd"; fi
 
   if (cd "$cwd" && printf '%s' "$out" | "$S/openloops.sh" >/dev/null 2>&1); then ok
   else bad "openloops $sid"; fi
@@ -134,6 +147,28 @@ if printf '%s' "$zero" | LASTCALL_LEDGER="$LEDGER.zero" "$S/ledger.sh" append \
      >/dev/null 2>&1
 then ok; else bad "ledger append on a zero-token session"; fi
 rm -f "$LEDGER.zero"
+
+# 1b. speed and service_tier change what a request bills at, and rates.json has
+# no axis for either. Such a row must come back flagged rather than quietly
+# priced at standard rates — the same failure pricing_source exists to prevent.
+tier='{"session":{"id":"fixture-fast-mode","cwd":"/","branch":"main",
+  "started":"2026-08-01T00:00:00Z","ended":"2026-08-01T00:00:01Z",
+  "wall_s":1,"active_s":1,"agent_s":0,"agent_turns":0},
+  "tokens":[{"model":"claude-opus-5","lane":"main","speed":"fast",
+    "service_tier":"priority","turns":1,"input":100,"output":100,
+    "cache_read":0,"cache_w_5m":0,"cache_w_1h":0,"thinking":0,
+    "web_search":3,"web_fetch":0,"efforts":{"high":1}}],
+  "agents":[],"work":{"tools":{},"files":{},"skills":[]},
+  "friction":{"tool_errors":0,"interrupts":0,"denials":0},"evidence":[]}'
+tc="$(printf '%s' "$tier" | "$S/cost.sh" 2>/dev/null)"
+if printf '%s' "$tc" | jq -e '[.caveats[] | select(test("speed=fast"))] | length == 1' \
+     >/dev/null 2>&1
+then ok; else bad "cost did not flag a non-standard speed/service_tier"; fi
+# Server-tool requests bill per request, so they belong in a caveat too rather
+# than being absorbed into a token total that cannot express them.
+if printf '%s' "$tc" | jq -e '.server_tools.web_search_requests == 3
+      and ([.caveats[] | select(test("web search"))] | length == 1)' >/dev/null 2>&1
+then ok; else bad "cost did not surface unpriced web search requests"; fi
 
 # 2. A session keeps writing to the project directory it started in, so
 # renaming the working directory strands the transcript under the old slug.

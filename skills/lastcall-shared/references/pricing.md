@@ -42,6 +42,30 @@ why `meter-session.sh` keeps five separate buckets instead of two, and why
 `cache_w_5m` and `cache_w_1h` are never summed — they bill at different
 multipliers, and main threads and subagents use different TTLs.
 
+## What this formula does not price
+
+Two kinds of spend exist in the meter output and have **no rate in the table**.
+`cost.sh` reports them under `caveats` rather than folding them in, because a
+total that silently omits them looks complete:
+
+- **Server tools.** `web_search` and `web_fetch` requests bill **per request,
+  not per token**, so no token bucket can express them. The meter counts them;
+  `cost.sh` names the count and excludes it from `total_usd`.
+- **Non-standard pricing dimensions.** `speed` (fast mode) and `service_tier`
+  (priority, batch) change what a request bills at, and `rates.json` has no axis
+  for either. Such a row is priced at standard rates **and flagged**. Never
+  quietly accept the standard-rate figure for it.
+
+`thinking` is the opposite case: it is already inside `output` and priced there.
+Never add it to a total.
+
+## Skill attribution
+
+Claude Code writes `attributionSkill` / `attributionPlugin` onto assistant turns,
+so `cost.sh` can report `by_skill` — what each skill cost — with the same rate
+table. The row with `skill: null` is the unattributed remainder; keep it, or the
+parts stop summing to the whole. `verify.sh` asserts that sum.
+
 ## Rules
 
 **Never hardcode rates.** They live in `rates.json`, refreshed from the

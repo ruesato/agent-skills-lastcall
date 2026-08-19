@@ -60,22 +60,46 @@ downstream from `references/pricing.md` so this contract stays correct.
     "started":  "2026-08-03T01:34:38Z",
     "ended":    "2026-08-06T08:46:49Z",
     "wall_s":   285131,   // first to last timestamp; near-meaningless if resumed
-    "active_s": 7754      // sum of inter-event gaps <= IDLE_GAP_S (default 300)
+    "active_s": 7754,     // sum of inter-event gaps <= IDLE_GAP_S (default 300)
+
+    // Claude Code own measure of agent-busy time: the sum of its turn_duration
+    // records. No idle heuristic in it, but it is a FLOOR — the turn in flight
+    // has not been written yet, so a session metered mid-turn is missing it,
+    // and a session that has never completed a turn reports 0.
+    "agent_s":     4177.8,
+    "agent_turns": 17     // completed user turns that contributed to agent_s
   },
 
-  // One row per (model, lane). Never collapse these: main threads and subagents
-  // use different cache TTLs, which price differently.
+  // One row per (model, lane, speed, service_tier). Never collapse these:
+  // main threads and subagents use different cache TTLs, and speed (fast mode)
+  // and service_tier (priority, batch) change what a request bills at. null in
+  // either means the transcript did not record it, which is not the same claim
+  // as "standard".
   "tokens": [
     { "model": "claude-opus-5", "lane": "main",     // "main" | "subagent"
+      "speed": "standard", "service_tier": "standard",
       "turns": 211, "input": 396, "output": 148499,
-      "cache_read": 35035360, "cache_w_5m": 0, "cache_w_1h": 1107741 }
+      "cache_read": 35035360, "cache_w_5m": 0, "cache_w_1h": 1107741,
+      "thinking": 63846,        // SUBSET of output, never added to a total
+      "web_search": 0, "web_fetch": 0,   // server tools; billed per REQUEST
+      "efforts": { "high": 211 }         // reasoning effort -> turn count
+    }
   ],
 
   "agents": [ { "agentType": "Explore", "description": "...", "spawnDepth": 1 } ],
 
   "work": {
     "tools": { "Bash": 150, "Edit": 61 },            // name -> call count
-    "files": { "/abs/path.md": 14 }                  // path -> edit count (churn)
+    "files": { "/abs/path.md": 14 },                 // path -> edit count (churn)
+
+    // Per-turn skill/plugin attribution, written by Claude Code itself.
+    // skill: null is the unattributed remainder — plain conversational turns.
+    // Keep it: without it the parts stop summing to the whole.
+    "skills": [
+      { "skill": "claude-api", "plugin": null, "model": "claude-opus-5",
+        "turns": 8, "input": 16, "output": 11340,
+        "cache_read": 4049677, "cache_w_5m": 0, "cache_w_1h": 361355 }
+    ]
   },
 
   "friction": { "tool_errors": 7, "interrupts": 1, "denials": 0 },
@@ -100,6 +124,17 @@ Each of these silently corrupts totals if a reimplementation drops it:
    different multipliers.
 6. **`denials` counts only `toolDenialKind == "user-rejected"`.** The
    `automode-*` kinds are harness state, not user friction.
+7. **Pricing dimensions stay in the group key.** `speed` and `service_tier`
+   change what a request bills at. Folding rows across them prices a fast-mode
+   or priority-tier session at standard rates and leaves no trace that it
+   happened — the same silent-miscomparison failure `pricing_source` exists to
+   prevent.
+8. **`thinking` is a subset of `output`, not a sixth bucket.** Adding it to a
+   total double-counts. It exists so a jump in output tokens can be told apart
+   from a jump in reasoning.
+9. **`agent_s` is a floor, never a replacement for `active_s`.** They measure
+   different things — agent busy versus human engaged — and only `active_s`
+   covers the turn currently in flight.
 
 ---
 
@@ -197,13 +232,16 @@ Global across projects, with `cwd` as a filterable field. Written by
   "cwd":        "/Users/you/code/project",
   "branch":     "feat/thing",
   "started":    "...", "ended": "...", "active_s": 7754,
+  "agent_s":    4177.8,                         // null on rows written before it existed
 
   "cost": {
     "usd": 4.18,
     "by_model": [ { "model": "claude-opus-5", "lane": "main", "usd": 3.91 } ],
+    "by_skill": [ { "skill": "claude-api", "plugin": null, "usd": 0.27 } ],
     "pricing_source": "claude-api@2026-08-18",  // which rate table produced this
     "promo_applied": true,                      // any lane billed at a promo rate
-    "promo_models": ["claude-sonnet-5"]         // which ones
+    "promo_models": ["claude-sonnet-5"],        // which ones
+    "caveats": []                               // why usd may understate; see below
   },
 
   "tokens":   { /* contract 1 `tokens`, verbatim */ },
@@ -237,6 +275,14 @@ Global across projects, with `cwd` as a filterable field. Written by
   `null`, which counts as *unknown* — never as "no promo", since silently
   folding them into the full-rate bucket would erase the very boundary the
   field exists to expose.
+- **`caveats` is non-empty when `usd` is known to understate.** An
+  unpriceable service tier or server-tool requests that bill per request rather
+  than per token both land here. A row carrying caveats is not directly
+  comparable to one that does not, for the same reason `pricing_source` exists.
+- **New fields are additive and do not bump `schema`.** Consumers ignore
+  unknown fields, and a missing field on an older row means *unmeasured*, never
+  zero — `agent_s` and `caveats` are both absent on rows written before they
+  existed. Never fold an absent value into a real bucket.
 - **Absent evidence is recorded as absent**, never as zero completed tasks.
   A session with no evidence files reports "not assessed" — inferring
   productivity from token burn rewards thrashing.

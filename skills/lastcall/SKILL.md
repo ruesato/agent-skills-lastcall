@@ -82,6 +82,16 @@ report token counts with **no dollar figure**. Never substitute a guessed rate:
 a wrong cost figure is worse than none, because nothing about it looks wrong.
 See `../lastcall-shared/references/pricing.md`.
 
+**Surface `caveats` whenever it is non-empty.** It lists what `total_usd` is
+known to leave out — server-tool requests that bill per request rather than per
+token, or a fast-mode/priority-tier row that no rate in the table covers. This
+figure goes into the ledger and becomes a baseline other sessions are compared
+against, so an unflagged understatement contaminates every later comparison.
+
+`by_skill` is available when the user wants to know where the money went by
+skill rather than by model. The `skill: null` row is the unattributed
+remainder — plain conversational turns — not a skill named null.
+
 ## 3. Evidence and open loops
 
 ```bash
