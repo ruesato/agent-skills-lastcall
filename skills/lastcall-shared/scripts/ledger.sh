@@ -78,8 +78,13 @@ cmd_append() {
       cwd: $m.session.cwd, branch: $m.session.branch,
       started: $m.session.started, ended: $m.session.ended,
       active_s: $m.session.active_s,
+      # promo state is recorded per row because a promo expiry moves the cost
+      # of every later row without any behavior changing. Without it, a trend
+      # spanning the boundary shows a step change that cannot be attributed.
+      # No apostrophes here: the whole program is single-quoted in sh.
       cost: { usd: $c.total_usd, by_model: $c.by_model,
-              pricing_source: $c.pricing_source },
+              pricing_source: $c.pricing_source,
+              promo_applied: $c.promo_applied, promo_models: $c.promo_models },
       tokens: $m.tokens,
       work: { tool_calls: ($m.work.tools | to_entries | map(.value) | add // 0),
               files_changed: ($m.work.files | length),
@@ -139,7 +144,20 @@ cmd_trend() {
           active_min_median: ($withev | map((.active_s/60) / .evidence.completed) | pct(0.5) | r2)
         } end),
 
-        pricing_sources: ($all | map(.cost.pricing_source) | unique)
+        pricing_sources: ($all | map(.cost.pricing_source) | unique),
+
+        # A promo expiring re-prices every later session without anything about
+        # the work changing. Say so, rather than letting a reader attribute the
+        # step to their own behavior. Rows written before promo state was
+        # recorded carry null, which is "unknown", not "no promo".
+        pricing_regimes:
+          (($all | map(.cost.promo_applied)) as $p
+           | { promotional: ($p | map(select(. == true))  | length),
+               full_rate:   ($p | map(select(. == false)) | length),
+               unknown:     ($p | map(select(. == null))  | length) }
+           | . + (if (.promotional > 0 and .full_rate > 0)
+                  then { note: "these rows span a pricing change — a step in this trend may be a rate change, not a behavior change" }
+                  else {} end))
       }
     # A single row is not a baseline. Say so rather than reporting a "median"
     # of one and letting a reader treat it as typical.

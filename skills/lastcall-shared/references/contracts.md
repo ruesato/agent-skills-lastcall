@@ -201,7 +201,9 @@ Global across projects, with `cwd` as a filterable field. Written by
   "cost": {
     "usd": 4.18,
     "by_model": [ { "model": "claude-opus-5", "lane": "main", "usd": 3.91 } ],
-    "pricing_source": "claude-api@2026-08-17"   // which rate table produced this
+    "pricing_source": "claude-api@2026-08-18",  // which rate table produced this
+    "promo_applied": true,                      // any lane billed at a promo rate
+    "promo_models": ["claude-sonnet-5"]         // which ones
   },
 
   "tokens":   { /* contract 1 `tokens`, verbatim */ },
@@ -228,6 +230,13 @@ Global across projects, with `cwd` as a filterable field. Written by
   the row must be replaceable in place.
 - **`pricing_source` is required.** A cost figure whose rate table is unknown
   cannot be compared against other rows, and rates change over time.
+- **`promo_applied` records the pricing regime, and absent means unknown.** A
+  promo expiring re-prices every later row without any behavior changing, so
+  `ledger.sh trend` reports how many rows fall in each regime and flags a
+  baseline that spans a change. Rows written before this field existed carry
+  `null`, which counts as *unknown* — never as "no promo", since silently
+  folding them into the full-rate bucket would erase the very boundary the
+  field exists to expose.
 - **Absent evidence is recorded as absent**, never as zero completed tasks.
   A session with no evidence files reports "not assessed" — inferring
   productivity from token burn rewards thrashing.

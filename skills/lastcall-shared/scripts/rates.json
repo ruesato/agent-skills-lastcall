@@ -1,6 +1,6 @@
 {
   "_comment": "Rate table for cost computation. See ../references/pricing.md. Refresh from the claude-api skill; do not edit from memory.",
-  "verified_on": "2026-08-17",
+  "verified_on": "2026-08-18",
   "source": "claude-api",
 
   "multipliers": {
