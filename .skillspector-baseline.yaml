@@ -1,0 +1,42 @@
+# SkillSpector baseline — reviewed findings accepted as false positives.
+# Docs: https://github.com/NVIDIA/SkillSpector/blob/main/docs/SUPPRESSION.md
+#
+# Calibrated by: skillspector v2.9.5 (the SHA pinned in
+#   .github/workflows/skillspector.yml), static analysis only (--no-llm).
+# Both facts matter. Exact fingerprints fail closed when `scanner_version` does
+# not match or the source text moved, so bumping the pinned SHA — or turning on
+# the LLM semantic stage — will resurface these findings for re-review rather
+# than silently keeping them suppressed. That is the intended behaviour: a
+# suppression should not outlive the thing it was reviewed against.
+#
+# Why fingerprints rather than glob `rules`: a fingerprint binds to the actual
+# decoded source text, so editing the excused paragraph invalidates the
+# suppression and the finding comes back. A glob rule would keep suppressing
+# whatever new wording still matched it. SkillSpector's own guidance reserves
+# `rules` for deliberate, tightly-scoped policy suppressions precisely because
+# "a broad rule can hide newly malicious content". This repo has no such policy
+# case yet, so `rules` is empty. If one is ever added, scope it with `path` and
+# `message` and note that the glob suppresses ANY future hit on that phrase at
+# that path — including in a file that has since gained new wording.
+#
+# Never suppress a finding you have not understood. Every entry below was read
+# at its source location first.
+version: 2
+scanner_version: 2.9.5
+rules: []
+fingerprints:
+- hash: sha256:1334422e9b4cd065d879c501eaedca565ddaf4e69f6565aa56b343dc2470245b
+  rule_id: RA2
+  file: SKILL.md
+  reason: >-
+    False positive in skills/tally/SKILL.md ("Absolute boundary", lines 17-21).
+    RA2 "Session Persistence" matched the paragraph that DENIES persistence:
+    "This skill has no side effects. It does not commit, does not write to the
+    ledger, does not save memories, does not touch the evidence drop-box, and
+    does not modify any file." The static pattern keys on the
+    ledger/memories/state vocabulary and cannot read the negation, so it
+    flagged the guarantee as the violation (confidence 0.6). Verified at
+    source: tally's SKILL.md defines no write path of any kind, and
+    skills/lastcall-shared/scripts/ledger.sh:11 states "Written by lastcall
+    only. tally never writes." Writing is the difference between the two
+    skills, and this text is what documents that tally does none of it.
