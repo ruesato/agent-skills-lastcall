@@ -1,6 +1,6 @@
 ---
 name: lastcall-shared
-description: Internal shared contracts and scripts for the lastcall and tally skills. Never invoke this directly. It holds the session metering script, the data contracts, and the pricing and summary reference files that those two skills read at runtime.
+description: Internal file container for lastcall and tally. Not invocable.
 user-invocable: false
 disable-model-invocation: true
 ---
