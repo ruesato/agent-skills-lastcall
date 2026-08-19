@@ -112,6 +112,46 @@ if "$S/doctrine-check.sh" "$HERE" | jq -e '.status' >/dev/null 2>&1; then ok
 else bad "doctrine-check"; fi
 say "  invariants checked"
 
+# ---------------------------------------------------------------- fixtures
+# The sweep above is only as good as the corpus on this machine. Two failure
+# modes are real but incidental to any given corpus, so they are pinned here
+# with fixtures that are always present.
+
+# 1. A session metered before its first assistant turn lands has no token rows
+# at all. That made `map(...) | add` return null, and null * 10000 aborts jq,
+# which took down cost.sh and, through it, ledger.sh append.
+zero='{"session":{"id":"fixture-zero-token","cwd":"/","branch":"main",
+  "started":"1970-01-01T00:00:00Z","ended":"1970-01-01T00:00:01Z",
+  "wall_s":1,"active_s":1},"tokens":[],"agents":[],
+  "work":{"tools":{},"files":{}},
+  "friction":{"tool_errors":0,"interrupts":0,"denials":0},"evidence":[]}'
+zc="$(printf '%s' "$zero" | "$S/cost.sh" 2>/dev/null)"
+if printf '%s' "$zc" | jq -e '.total_usd == 0
+      and (.promo_applied | type == "boolean")
+      and ([.by_bucket[] | select(. != 0)] | length) == 0' >/dev/null 2>&1
+then ok; else bad "cost on a zero-token session"; fi
+if printf '%s' "$zero" | LASTCALL_LEDGER="$LEDGER.zero" "$S/ledger.sh" append \
+     >/dev/null 2>&1
+then ok; else bad "ledger append on a zero-token session"; fi
+rm -f "$LEDGER.zero"
+
+# 2. A session keeps writing to the project directory it started in, so
+# renaming the working directory strands the transcript under the old slug.
+# Resolution by id has to reach across project directories to find it.
+FROOT="$(mktemp -d -t lastcall-fixture)"
+mkdir -p "$FROOT/-fixture-old-slug"
+jq -cn --arg cwd "$PWD" '{sessionId: "fixture-renamed", cwd: $cwd,
+    gitBranch: "main", type: "user", timestamp: "1970-01-01T00:00:00Z"}' \
+  > "$FROOT/-fixture-old-slug/fixture-renamed.jsonl"
+if CLAUDE_PROJECTS="$FROOT" "$S/meter-session.sh" fixture-renamed 2>/dev/null \
+     | jq -e '.session.id == "fixture-renamed"' >/dev/null 2>&1
+then ok; else bad "meter cannot resolve a transcript under a renamed project dir"; fi
+# The same lookup must still fail loudly for an id that exists nowhere.
+if CLAUDE_PROJECTS="$FROOT" "$S/meter-session.sh" fixture-absent >/dev/null 2>&1
+then bad "meter succeeded on a nonexistent session id"; else ok; fi
+rm -rf "$FROOT"
+say "  fixtures checked"
+
 # ---------------------------------------------------------------- result
 echo
 if [ "$fail" -eq 0 ]; then
