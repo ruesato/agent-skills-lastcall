@@ -115,4 +115,8 @@ gate.
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).
+
+`bin/scan-skills.sh` and `.github/workflows/skillspector.yml` are adapted from
+[crodris/skills](https://github.com/crodris/skills) under the MIT License; that
+notice is retained in `LICENSE`.
