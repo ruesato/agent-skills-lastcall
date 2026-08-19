@@ -17,7 +17,6 @@ IDLE_GAP_S="${IDLE_GAP_S:-300}"
 slug() { printf '%s' "$1" | sed 's|[^a-zA-Z0-9-]|-|g'; }
 
 PROJ="$ROOT/$(slug "$PWD")"
-[ -d "$PROJ" ] || { echo "no transcripts for $PWD" >&2; exit 1; }
 
 # Newest .jsonl by mtime, without shelling out to `ls`: `ls` is commonly
 # aliased or shadowed (eza, exa), and those replacements reject `-t`.
@@ -39,12 +38,25 @@ if [ $# -ge 1 ]; then
 elif [ -n "${CLAUDE_SESSION_ID:-}" ]; then
   SID="$CLAUDE_SESSION_ID"
 else
+  [ -d "$PROJ" ] || { echo "no transcripts for $PWD" >&2; exit 1; }
   SID=$(newest_jsonl "$PROJ")
   [ -n "$SID" ] || { echo "no transcripts in $PROJ" >&2; exit 1; }
 fi
 
 MAIN="$PROJ/$SID.jsonl"
-[ -f "$MAIN" ] || { echo "no transcript: $MAIN" >&2; exit 1; }
+# A session keeps writing to the project directory it STARTED in, so renaming
+# the working directory strands the transcript under the old slug while $PWD
+# now hashes to a new one. A session id is globally unique, so widening the
+# search to every project directory is unambiguous, and it is the only way to
+# meter a session that spans a rename. Subagents live beside the main file, so
+# PROJ moves with it.
+if [ ! -f "$MAIN" ]; then
+  for d in "$ROOT"/*/; do
+    [ -f "$d$SID.jsonl" ] || continue
+    PROJ="${d%/}"; MAIN="$PROJ/$SID.jsonl"; break
+  done
+fi
+[ -f "$MAIN" ] || { echo "no transcript for $SID under $ROOT" >&2; exit 1; }
 SUBS=("$PROJ/$SID/subagents"/*.jsonl)
 [ -e "${SUBS[0]}" ] || SUBS=()
 

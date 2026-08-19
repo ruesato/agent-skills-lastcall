@@ -59,7 +59,7 @@ jq -s --slurpfile r "$RATES" '
     )) as $priced
 
   | {
-      total_usd: ($priced | map(.usd) | add | .*10000 | round / 10000),
+      total_usd: ($priced | map(.usd) | add // 0 | .*10000 | round / 10000),
       by_model:  ($priced | map({model, lane, usd: (.usd*10000|round/10000), promo_applied})),
 
       # Rollup, because consumers read the top level. Without this the key was
@@ -73,10 +73,10 @@ jq -s --slurpfile r "$RATES" '
 
       # Where the money actually went, in dollars rather than tokens.
       by_bucket: {
-        input:       ($priced | map(.input      * (if .promo_applied then $rates.models[(.model|sub("-20[0-9]{6}$";""))].promo.input else $rates.models[(.model|sub("-20[0-9]{6}$";""))].input end)) | add / 1000000),
-        cache_read:  ($priced | map(.cache_read * (if .promo_applied then $rates.models[(.model|sub("-20[0-9]{6}$";""))].promo.input else $rates.models[(.model|sub("-20[0-9]{6}$";""))].input end) * $mult.cache_read) | add / 1000000),
-        cache_write: ($priced | map((.cache_w_5m * $mult.cache_write_5m + .cache_w_1h * $mult.cache_write_1h) * (if .promo_applied then $rates.models[(.model|sub("-20[0-9]{6}$";""))].promo.input else $rates.models[(.model|sub("-20[0-9]{6}$";""))].input end)) | add / 1000000),
-        output:      ($priced | map(.output     * (if .promo_applied then $rates.models[(.model|sub("-20[0-9]{6}$";""))].promo.output else $rates.models[(.model|sub("-20[0-9]{6}$";""))].output end)) | add / 1000000)
+        input:       ($priced | map(.input      * (if .promo_applied then $rates.models[(.model|sub("-20[0-9]{6}$";""))].promo.input else $rates.models[(.model|sub("-20[0-9]{6}$";""))].input end)) | add // 0 | . / 1000000),
+        cache_read:  ($priced | map(.cache_read * (if .promo_applied then $rates.models[(.model|sub("-20[0-9]{6}$";""))].promo.input else $rates.models[(.model|sub("-20[0-9]{6}$";""))].input end) * $mult.cache_read) | add // 0 | . / 1000000),
+        cache_write: ($priced | map((.cache_w_5m * $mult.cache_write_5m + .cache_w_1h * $mult.cache_write_1h) * (if .promo_applied then $rates.models[(.model|sub("-20[0-9]{6}$";""))].promo.input else $rates.models[(.model|sub("-20[0-9]{6}$";""))].input end)) | add // 0 | . / 1000000),
+        output:      ($priced | map(.output     * (if .promo_applied then $rates.models[(.model|sub("-20[0-9]{6}$";""))].promo.output else $rates.models[(.model|sub("-20[0-9]{6}$";""))].output end)) | add // 0 | . / 1000000)
       } | with_entries(.value |= (.*10000|round/10000)),
 
       # Required by the ledger contract: a cost figure whose rate table is
