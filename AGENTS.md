@@ -167,5 +167,16 @@ stronger guarantee than the conservative profile's "ask first", not a weaker one
 indistinguishable in a transcript from a grep that matched nothing, so test state
 is never inferred from exit codes. Report what you actually observed, or nothing.
 
+**SkillSpector is the CI security gate.** Every skill under `skills/` is scanned
+by NVIDIA SkillSpector on push and PR, and the build fails on any non-suppressed
+finding (`.github/workflows/skillspector.yml`, `bin/scan-skills.sh`). It is
+complementary to `verify.sh`, which is a local-only correctness sweep over
+transcripts — neither replaces the other. Suppressions live in
+`.skillspector-baseline.yaml` as fingerprints bound to the source text and the
+scanner version, so they fail closed: when a `SKILL.md` edit or a version bump
+shifts findings, re-run `bin/scan-skills.sh`, review what resurfaced at its
+source location, and re-baseline. Never suppress a finding you have not
+understood.
+
 Full detail in `skills/lastcall/SKILL.md`. Note that this section sits outside
 the generated blocks above — `bd setup` rewrites those, so do not move it inside.
