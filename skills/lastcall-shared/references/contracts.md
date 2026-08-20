@@ -92,6 +92,15 @@ downstream from `references/pricing.md` so this contract stays correct.
     "tools": { "Bash": 150, "Edit": 61 },            // name -> call count
     "files": { "/abs/path.md": 14 },                 // path -> edit count (churn)
 
+    // Whether `files` above can be read as the whole picture. It is built from
+    // Edit/Write/NotebookEdit only, so a session that edits through Bash leaves
+    // it EMPTY, and {} then has to mean unmeasured rather than untouched.
+    // attributed is false when the session ran Bash but never called an edit
+    // tool. Paths are never recovered from shell commands: the common forms
+    // name no file the transcript can see.
+    "files_coverage": { "edit_tool_calls": 61, "bash_calls": 150,
+                        "attributed": true },
+
     // Per-turn skill/plugin attribution, written by Claude Code itself.
     // skill: null is the unattributed remainder — plain conversational turns.
     // Keep it: without it the parts stop summing to the whole.
@@ -180,14 +189,19 @@ Each of these silently corrupts totals if a reimplementation drops it:
 8. **`thinking` is a subset of `output`, not a sixth bucket.** Adding it to a
    total double-counts. It exists so a jump in output tokens can be told apart
    from a jump in reasoning.
-9. **`native` is absent unless captured, and never emitted with zeroes.** A
+9. **An empty `work.files` is not a claim that nothing was edited.** Read
+   `work.files_coverage.attributed` first. When it is false, the file-level
+   view is unmeasured and any ratio over it is a fabrication rather than an
+   approximation. Note for consumers: `attributed` is a real boolean, so
+   defaulting it with jq `//` inverts it — `false // true` is `true`.
+10. **`native` is absent unless captured, and never emitted with zeroes.** A
    missing field there means unmeasured. Reporting an absent rate-limit window
    as 0% tells the user they have a full window left, which is worse than
    reporting nothing. Its `cost_usd` is advisory and never substitutes for the
    figure `cost.sh` derives from tokens; `cost.sh` compares them in
    `cross_check` and refuses the comparison outright when `native.wall_ms`
    shows their clock covers less time than the transcript does.
-10. **`agent_s` is a floor, never a replacement for `active_s`.** They measure
+11. **`agent_s` is a floor, never a replacement for `active_s`.** They measure
    different things — agent busy versus human engaged — and only `active_s`
    covers the turn currently in flight.
 

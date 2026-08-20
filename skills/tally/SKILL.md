@@ -183,6 +183,28 @@ does); report nothing. When `diverged` is true the divergence is already in
 `caveats`, naming both figures — surface it, because the likely cause is a stale
 `rates.json` and that silently contaminates every ledger comparison downstream.
 
+## 6. When file counts are unavailable
+
+`work.files` is built from `Edit`, `Write`, and `NotebookEdit` calls only. A
+session that edits through Bash — heredocs, `sed -i`, a script that writes files
+— leaves nothing there, and some harness modes instruct Bash-first editing, so
+this is a normal operating condition rather than an edge case.
+
+`work.files_coverage` says whether to trust it:
+
+```jsonc
+{ "edit_tool_calls": 0, "bash_calls": 86, "attributed": false }
+```
+
+**When `attributed` is false, report that the file-level view is unavailable.**
+Do not print `0 files`, and do not drop the segment silently either — an absent
+number and a zero read identically to someone scanning a one-line readout, and
+zero is the one that is wrong. Say "files: not measured (edited through Bash)"
+and give the Bash call count if the user wants the detail.
+
+This does not affect anything else. Cost, tokens, time, friction, and skill
+attribution are all still exact — only the per-file breakdown degrades.
+
 ## Notes
 
 Report what the meter measured, nothing more. Do not infer productivity from

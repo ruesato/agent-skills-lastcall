@@ -65,6 +65,18 @@ produces. From `openloops.sh`:
   nothing. `churn_external_files` carries the count that was filtered out, so
   the filtering is visible rather than silent — report it only if it is large
   enough to be interesting.
+- **`churn_available`** — whether the churn list above means anything. Churn is
+  counted from edit tool calls, so a session that edited through Bash — heredocs,
+  `sed -i`, a script that writes files — produces no hotspots however much it
+  thrashed. **When this is false, say the file-level view is unavailable. Never
+  report "no churn" or a file count of zero**, and never write a Landed line
+  that leans on `work.files` being empty. Paths are deliberately not recovered
+  from shell commands: the common forms name no file the transcript can see, and
+  a wrong path here is worse than a missing one.
+- **`uncommitted_unattributed`** — uncommitted files that no edit tool accounts
+  for. Read with `churn_available`, this is the direct evidence that work landed
+  outside the meter view. On its own it is not proof: a file that was already
+  dirty when the session started looks the same from here.
 - **`todos_added`** — TODO/FIXME/XXX/HACK markers in uncommitted work. A marker
   already committed is a backlog item, not an open loop from this session.
 - **evidence** with status `partial` or `blocked`.
@@ -100,6 +112,9 @@ cost per completed task          needs evidence
 active minutes per completed task needs evidence
 friction rate                    (errors + interrupts + denials) per 100 tool calls
 churn ratio                      total edits / distinct files
+                                 (omit entirely when churn_available is false —
+                                  a ratio over an unmeasured denominator is a
+                                  fabrication, not an approximation)
 subagent share                   % of cost in the subagent lane
 ```
 

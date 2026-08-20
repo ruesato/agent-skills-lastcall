@@ -42,18 +42,35 @@ say "  $pass ok"
 
 # ---------------------------------------------------------------- sweep
 say "== transcripts =="
-sessions=0; withsub=0
+sessions=0; withsub=0; stale_cwd=0; seen=""
 for f in "$PROJECTS"/*/*.jsonl; do
   [ -f "$f" ] || continue
   sid="$(basename "$f" .jsonl)"
-  # The meter resolves its project directory from $PWD, so each session must be
-  # metered from the cwd its transcript recorded. Passing a bare id from the
-  # wrong directory reports a spurious failure.
-  cwd="$(jq -rs 'map(.cwd // empty) | first // empty' "$f" 2>/dev/null)"
-  [ -n "$cwd" ] && [ -d "$cwd" ] || continue
+  # A session that outlived a directory rename has its transcript in TWO project
+  # dirs under one id. The meter reads both, so metering it once per file would
+  # just repeat the same check against the same combined output.
+  case " $seen " in *" $sid "*) continue ;; esac
+  seen="$seen $sid"
   sessions=$((sessions+1))
 
-  out="$(cd "$cwd" && "$S/meter-session.sh" "$sid" 2>/dev/null)"
+  # The recorded cwd is a lossy round trip. Rename a project directory and every
+  # transcript that recorded the old path points at nothing, and this sweep used
+  # to `continue` on exactly that condition — dropping those transcripts
+  # silently, counting them as neither pass nor fail, and still printing a clean
+  # result on a reduced corpus. Observed 2026-08-19 right after this project was
+  # renamed: 31 transcripts, 26 swept, 5 skipped, and all 5 skipped ones were
+  # this project. The suite the meter was tuned against went invisible to the
+  # suite that verifies it, and the output said nothing.
+  #
+  # The fix is to stop needing a cwd. A session id resolves against every project
+  # directory, so meter by id and use the recorded cwd only when it still exists,
+  # which keeps the $PWD resolution path exercised. Count the rest instead of
+  # dropping them.
+  cwd="$(jq -rs 'map(.cwd // empty) | first // empty' "$f" 2>/dev/null)"
+  if [ -n "$cwd" ] && [ -d "$cwd" ]; then runcwd="$cwd"
+  else runcwd="$HERE"; stale_cwd=$((stale_cwd+1)); fi
+
+  out="$(cd "$runcwd" && "$S/meter-session.sh" "$sid" 2>/dev/null)"
   if [ -z "$out" ] || ! printf '%s' "$out" | jq -e '.session.id' >/dev/null 2>&1; then
     bad "meter $sid"; continue
   fi
@@ -81,18 +98,31 @@ for f in "$PROJECTS"/*/*.jsonl; do
        >/dev/null 2>&1; then ok
   else bad "cost $sid: by_skill does not sum to total_usd"; fi
 
-  if (cd "$cwd" && printf '%s' "$out" | "$S/openloops.sh" >/dev/null 2>&1); then ok
+  # openloops.sh cds into the cwd the METER reports, so the caller location is
+  # irrelevant — and the metered cwd is the live one even for a split session,
+  # while the cwd recorded at the top of the file may be the pre-rename path.
+  if printf '%s' "$out" | "$S/openloops.sh" >/dev/null 2>&1; then ok
   else bad "openloops $sid"; fi
   # Churn must stay inside the project: a scratchpad temp file is not a
   # struggle signature.
-  ext="$(cd "$cwd" && printf '%s' "$out" | "$S/openloops.sh" 2>/dev/null \
-        | jq --arg c "$cwd" '[.churn_hotspots[]?.file | select(startswith($c) | not)] | length')"
+  mcwd="$(printf '%s' "$out" | jq -r '.session.cwd // empty')"
+  ext="$(printf '%s' "$out" | "$S/openloops.sh" 2>/dev/null \
+        | jq --arg c "$mcwd" '[.churn_hotspots[]?.file | select(startswith($c) | not)] | length')"
   if [ "${ext:-1}" = "0" ]; then ok; else bad "openloops $sid: churn includes out-of-project files"; fi
 
   if printf '%s' "$out" | "$S/ledger.sh" append >/dev/null 2>&1; then ok
   else bad "ledger $sid"; fi
 done
-say "  $sessions sessions ($withsub with subagents)"
+say "  $sessions sessions ($withsub with subagents, $stale_cwd with a stale recorded cwd)"
+
+# The sweep must cover every distinct session id on disk. This is the check that
+# would have caught the rename: without it the corpus shrank by a sixth and the
+# run still printed PASS, which is worse than a failure because it looks the
+# same as the day before.
+ondisk="$(for f in "$PROJECTS"/*/*.jsonl; do [ -f "$f" ] && basename "$f" .jsonl; done \
+          | sort -u | wc -l | tr -d ' ')"
+if [ "$sessions" = "$ondisk" ]; then ok
+else bad "sweep covered $sessions of $ondisk session ids on disk — transcripts are being dropped"; fi
 
 # ------------------------------------------------------------ invariants
 say "== invariants =="
@@ -101,8 +131,9 @@ rows_before="$(wc -l < "$LEDGER" | tr -d ' ')"
 for f in "$PROJECTS"/*/*.jsonl; do
   [ -f "$f" ] || continue
   sid="$(basename "$f" .jsonl)"
+  # Same as the sweep: meter by id, never gate on a cwd that a rename can strand.
   cwd="$(jq -rs 'map(.cwd // empty) | first // empty' "$f" 2>/dev/null)"
-  [ -n "$cwd" ] && [ -d "$cwd" ] || continue
+  [ -n "$cwd" ] && [ -d "$cwd" ] || cwd="$HERE"
   (cd "$cwd" && "$S/meter-session.sh" "$sid" 2>/dev/null) | "$S/ledger.sh" append >/dev/null 2>&1
 done
 rows_after="$(wc -l < "$LEDGER" | tr -d ' ')"
@@ -184,6 +215,35 @@ then ok; else bad "meter cannot resolve a transcript under a renamed project dir
 # The same lookup must still fail loudly for an id that exists nowhere.
 if CLAUDE_PROJECTS="$FROOT" "$S/meter-session.sh" fixture-absent >/dev/null 2>&1
 then bad "meter succeeded on a nonexistent session id"; else ok; fi
+
+# 2b. That rename can also SPLIT one session across two project dirs under the
+# same id, and resolution that stops at the first match drops the other part
+# entirely — silently, since a partial transcript looks exactly like a short
+# session. Every count must combine, and the reported cwd must be the LATEST
+# one: the pre-rename path in the earlier part no longer exists, and consumers
+# cd into it.
+# Named so the STALE part globs FIRST. Otherwise glob order alone can make
+# the cwd assertion pass, and it would stop testing anything.
+mkdir -p "$FROOT/-fixture-split-1-stale" "$FROOT/-fixture-split-2-live"
+turn() {  # turn <requestId> <ts> <output-tokens> <cwd>
+  jq -cn --arg r "$1" --arg t "$2" --argjson o "$3" --arg c "$4" \
+    '{type: "assistant", requestId: $r, timestamp: $t, cwd: $c, gitBranch: "main",
+      message: {model: "claude-opus-5",
+                usage: {input_tokens: 10, output_tokens: $o, cache_read_input_tokens: 0,
+                        speed: "standard", service_tier: "standard"}}}'
+}
+{ turn r1 "2026-08-19T09:00:00.000Z" 100 /gone-after-the-rename
+  turn r2 "2026-08-19T09:00:30.000Z" 200 /gone-after-the-rename; } > "$FROOT/-fixture-split-1-stale/fixture-split.jsonl"
+{ turn r3 "2026-08-19T09:01:00.000Z" 400 "$PWD"; } > "$FROOT/-fixture-split-2-live/fixture-split.jsonl"
+split_out="$(CLAUDE_PROJECTS="$FROOT" "$S/meter-session.sh" fixture-split 2>/dev/null)"
+# 700 output tokens over 3 turns: every part counted, none double-counted.
+if printf '%s' "$split_out" | jq -e '([.tokens[].output] | add) == 700
+      and ([.tokens[].turns] | add) == 3' >/dev/null 2>&1
+then ok; else bad "meter dropped part of a session split across two project dirs"; fi
+# The later part wins the cwd, so openloops does not cd into a path that a
+# rename removed.
+if printf '%s' "$split_out" | jq -e --arg c "$PWD" '.session.cwd == $c' >/dev/null 2>&1
+then ok; else bad "meter reported the pre-rename cwd for a split session"; fi
 rm -rf "$FROOT"
 
 # 3. The statusLine capture. Both paths matter and only one of them shows up in
@@ -241,6 +301,36 @@ if [ -n "$CAPSID" ] && [ "$CAPSID" != "null" ]; then
   then ok; else bad "meter attributed another session capture to this one"; fi
   rm -f "$CAPD/$CAPSID.json"
 fi
+
+# 4. Bash-only editing. work.files is built from edit tool calls, so a session
+# that edits through Bash reports {} — and an empty map has to be readable as
+# "unmeasured" rather than "nothing was touched". The flag is what carries that
+# distinction, and it has to survive the jq trap that `false // true` is true.
+bashonly="$(jq -cn '{type: "assistant", requestId: "b1", timestamp: "2026-08-19T09:00:00.000Z",
+    cwd: "/", gitBranch: "main",
+    message: {model: "claude-opus-5",
+      usage: {input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0},
+      content: [{type: "tool_use", name: "Bash", input: {command: "true"}}]}}')"
+BROOT="$(mktemp -d -t lastcall-bashonly)"
+mkdir -p "$BROOT/-fixture-bash"
+printf '%s\n' "$bashonly" > "$BROOT/-fixture-bash/fixture-bash.jsonl"
+bout="$(CLAUDE_PROJECTS="$BROOT" "$S/meter-session.sh" fixture-bash 2>/dev/null)"
+if printf '%s' "$bout" | jq -e '.work.files == {}
+      and .work.files_coverage.bash_calls == 1
+      and .work.files_coverage.edit_tool_calls == 0
+      and .work.files_coverage.attributed == false' >/dev/null 2>&1
+then ok; else bad "meter did not flag a Bash-only session as unattributed"; fi
+# openloops must carry the flag through as false. `// true` would invert it here
+# — jq treats false as empty — and the readout would then claim no churn.
+if printf '%s' "$bout" | "$S/openloops.sh" 2>/dev/null \
+     | jq -e '.churn_available == false' >/dev/null 2>&1
+then ok; else bad "openloops reported churn as available for a Bash-only session"; fi
+# Meter output predating files_coverage must still default to available, so an
+# older ledger row does not start claiming its churn was unmeasured.
+if printf '%s' "$bout" | jq 'del(.work.files_coverage)' | "$S/openloops.sh" 2>/dev/null \
+     | jq -e '.churn_available == true' >/dev/null 2>&1
+then ok; else bad "openloops did not default churn_available to true when absent"; fi
+rm -rf "$BROOT"
 
 # The capture script itself, independent of any session. It sits in the status
 # line of whoever opts in, so the contract is that it cannot break one: stdin

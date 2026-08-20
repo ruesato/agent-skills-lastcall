@@ -79,6 +79,27 @@ jq -n --argjson m "$METER" --argjson git "$GIT" --argjson dirty "$DIRTY" \
           | map(select(.edits >= $cmin))
           | sort_by(-.edits) | .[0:$ctop] ),
 
+      # Whether that list can be trusted to be empty. Churn is counted from edit
+      # tool calls, so a session that edited through Bash produces no hotspots
+      # no matter how much it thrashed. False here means the struggle signal was
+      # NOT measured, which is a different report from "no struggle" and must
+      # not be collapsed into it.
+      # NOT `// true`: jq treats false as empty, so `false // true` is true and
+      # the flag would invert exactly when it matters. Older meter output has no
+      # files_coverage at all, and that absence is what defaults to true.
+      churn_available: ( $m.work.files_coverage.attributed
+                         | if . == null then true else . end ),
+
+      # Uncommitted files that no edit tool accounts for. This is the direct
+      # evidence that work happened outside what files can see. It is not proof
+      # of a Bash edit on its own: a file already dirty when the session started
+      # looks identical from here, and the transcript cannot separate them. Read
+      # it together with churn_available, which says whether any edit tool ran.
+      uncommitted_unattributed:
+        ( $dirtyfiles
+          | map(select(. as $d
+                | ($files | map(.key) | any(. as $f | $f | endswith($d))) | not)) ),
+
       # How many edited files were outside the project, so the filtering above
       # is visible rather than silent. Not a hotspot list — just a count.
       churn_external_files: $external_files,

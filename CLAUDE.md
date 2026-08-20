@@ -202,6 +202,11 @@ the only local option, not a workaround.
 - Three jq traps this codebase has already hit:
   - `add` on objects *overwrites* duplicate keys rather than summing them.
   - `fromdateiso8601` rejects the milliseconds these timestamps carry.
+  - `false // true` is **`true`**. jq treats `false` as empty, so `//` cannot be
+    used to default a boolean — it collapses exactly the value you were trying to
+    read. Hit in `openloops.sh` on `files_coverage.attributed`, where it inverted
+    the flag in precisely the case it exists for. Use
+    `if . == null then <default> else . end`.
   - An apostrophe inside a **comment** in a single-quoted jq program ends the shell
     string early. Write "the row" and "the reader", never "the row's" or "the
     reader's". The damage lands far from the typo: in `openloops.sh` it surfaced as

@@ -156,6 +156,26 @@ unparseable files with a warning rather than aborting, and dedupe on
 `todos_added`, and `evidence_open`. Its `git.dirty` also decides whether the
 commit delegation is offered at all in step 5.
 
+### When file counts are unavailable
+
+`work.files` sees `Edit`, `Write`, and `NotebookEdit` and nothing else, so a
+session that edited through Bash reports no files and no churn hotspots however
+much it actually changed. `work.files_coverage.attributed` is false when the
+session ran Bash but never called an edit tool, and `openloops.sh` carries the
+same signal as `churn_available`.
+
+**When it is false, say the file-level view is unavailable rather than reporting
+zero**, and drop the churn ratio entirely — a ratio over an unmeasured
+denominator is a fabrication. `uncommitted_unattributed` lists the uncommitted
+files no edit tool accounts for, which is the closest thing to a file list this
+case has; it cannot separate a Bash edit from drift that was already there, so
+present it as what it is.
+
+The grounding rule decides the rest: commits and diffs are artifacts and remain
+fully usable for the **Landed** section, so a session with no measurable
+`work.files` can still be summarized precisely. It is the *counts* that go
+missing, not the evidence.
+
 ## 4. Summarize
 
 **Read `../lastcall-shared/references/summary.md` and follow it.** It is the

@@ -43,22 +43,28 @@ else
   [ -n "$SID" ] || { echo "no transcripts in $PROJ" >&2; exit 1; }
 fi
 
-MAIN="$PROJ/$SID.jsonl"
 # A session keeps writing to the project directory it STARTED in, so renaming
 # the working directory strands the transcript under the old slug while $PWD
 # now hashes to a new one. A session id is globally unique, so widening the
-# search to every project directory is unambiguous, and it is the only way to
-# meter a session that spans a rename. Subagents live beside the main file, so
-# PROJ moves with it.
-if [ ! -f "$MAIN" ]; then
-  for d in "$ROOT"/*/; do
-    [ -f "$d$SID.jsonl" ] || continue
-    PROJ="${d%/}"; MAIN="$PROJ/$SID.jsonl"; break
+# search to every project directory is unambiguous.
+#
+# It can land in BOTH. A session that outlives a rename has its transcript split
+# across two project dirs under the same id, and stopping at the first match
+# silently drops every entry in the other one — measured on
+# 24dc7f38-0a55-4d14-80db-4e9b52210f37: 822 lines counted, 63 ignored, with no
+# indication anything was missing. So collect every match rather than picking
+# one. Each part is metered as its own main lane and the rollup sums them.
+MAINS=()
+SUBS=()
+for d in "$ROOT"/*/; do
+  [ -f "$d$SID.jsonl" ] || continue
+  MAINS+=("$d$SID.jsonl")
+  # Subagents live beside the main file, so they follow the split too.
+  for sf in "$d$SID/subagents"/*.jsonl; do
+    [ -f "$sf" ] && SUBS+=("$sf")
   done
-fi
-[ -f "$MAIN" ] || { echo "no transcript for $SID under $ROOT" >&2; exit 1; }
-SUBS=("$PROJ/$SID/subagents"/*.jsonl)
-[ -e "${SUBS[0]}" ] || SUBS=()
+done
+[ ${#MAINS[@]} -gt 0 ] || { echo "no transcript for $SID under $ROOT" >&2; exit 1; }
 
 # Optional: the statusLine capture written by capture-statusline.sh. It is the
 # only local source for rate_limits, which appear nowhere in a transcript, plus
@@ -183,6 +189,19 @@ meter_file() {
                  | map(select(.name == "Edit" or .name == "Write" or .name == "NotebookEdit"))
                  | map(.input.file_path // .input.notebook_path // empty)
                  | group_by(.) | map({ (.[0]): length }) | add // {} ),
+        # How much of the editing this session did is even VISIBLE to `files`
+        # above, which can only see the edit tools. A file written through Bash
+        # leaves no trace there, and some harness modes instruct Bash-first
+        # editing, so this is a normal operating condition rather than an edge
+        # case. Counts, never a guess: paths are not parsed back out of shell
+        # commands, because the common forms are undetectable — a heredoc that
+        # pipes into python and writes through open() names no file the
+        # transcript can see, and a wrong path in a churn hotspot is worse than
+        # an absent one.
+        edit_tool_calls: ( $tools
+                           | map(select(.name == "Edit" or .name == "Write"
+                                        or .name == "NotebookEdit")) | length ),
+        bash_calls: ( $tools | map(select(.name == "Bash")) | length ),
         friction: {
           # is_error is tri-state; null means the field is absent, not an error.
           tool_errors: ( map(select(.type=="user") | .message.content[]?
@@ -194,7 +213,7 @@ meter_file() {
       }' "$1"
 }
 
-{ meter_file "$MAIN" main
+{ for f in "${MAINS[@]}"; do meter_file "$f" main; done
   # The trailing "true" matters: with pipefail, a session that spawned no
   # subagents would otherwise leave this block-s status at 1 and fail the
   # pipeline despite jq having produced correct output.
@@ -219,13 +238,21 @@ meter_file() {
 
     { session: {
         id: $sid,
-        cwd:    (map(.cwd    | select(.)) | first),
-        branch: (map(.branch | select(.)) | first),
+        # The LATEST main lane wins, not the first. A split session carries the
+        # pre-rename path in its earlier part, and reporting that as the session
+        # cwd points every consumer at a directory that no longer exists.
+        cwd:    ((map(select(.lane == "main" and .cwd    != null)) | max_by(.last_ts) | .cwd)
+                 // (map(.cwd    | select(.)) | first)),
+        branch: ((map(select(.lane == "main" and .branch != null)) | max_by(.last_ts) | .branch)
+                 // (map(.branch | select(.)) | first)),
         started: (map(.first_ts) | min | todateiso8601),
         ended:   (map(.last_ts) | max | todateiso8601),
         wall_s:  ((map(.last_ts) | max) - (map(.first_ts) | min)),
         # Main-thread active time only: subagents run concurrently, so adding
         # their spans would double-count the same minutes.
+        # Summed across main lanes. A split session loses only the gap that
+        # straddles the two files, which is the rename itself — seconds, and in
+        # the conservative direction.
         active_s: (map(select(.lane=="main") | .active_s) | add // 0),
         # Native agent-busy time. Only the main thread emits turn_duration, and
         # only for turns that have ENDED, so this is a floor: a session metered
@@ -255,6 +282,16 @@ meter_file() {
       work: {
         tools: (map(.tools) | sum_maps),
         files: (map(.files) | sum_maps),
+        # Whether `files` can be read as the whole picture. attributed is false
+        # when the session ran Bash but never called an edit tool: work plainly
+        # happened and none of it is in `files`, so an empty map there means
+        # UNMEASURED, not "nothing was touched". Observed 2026-08-19: six files
+        # changed across two repos and seven commits, with files {} and Bash 86.
+        # Anything short of that is degraded rather than blind, and the raw
+        # counts are here so a consumer can say which.
+        files_coverage: ( { edit_tool_calls: (map(.edit_tool_calls) | add // 0),
+                            bash_calls:      (map(.bash_calls)      | add // 0) }
+                          | . + { attributed: (.bash_calls == 0 or .edit_tool_calls > 0) } ),
         # Attribution is absent on plain conversational turns, which group under
         # a null skill. That null row is the unattributed remainder, and dropping
         # it would make the parts stop summing to the whole.
