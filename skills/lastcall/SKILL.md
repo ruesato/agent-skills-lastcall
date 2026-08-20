@@ -176,6 +176,46 @@ fully usable for the **Landed** section, so a session with no measurable
 `work.files` can still be summarized precisely. It is the *counts* that go
 missing, not the evidence.
 
+## 3b. Establish what you can actually see
+
+Do this **before** writing anything qualitative. Two questions, both cheap:
+
+**1. Are you metering yourself?** Compare the id you metered against
+`${CLAUDE_SESSION_ID}`. They differ whenever this skill was invoked with an
+argument. When they differ you have **never seen that conversation** — it was
+never in your context and nothing in this project reads it from disk.
+
+**2. Was the session compacted?** `context.compactions > 0` means part of it
+left your context window; `context.dropped_tokens` says how much.
+
+```bash
+printf '%s' "$M" | jq -c '{metered: .session.id, context}'
+```
+
+Neither affects the numbers. The meter, `cost.sh`, `openloops.sh`, and the
+evidence drop-box all read from disk and are complete and correct for any
+session id, compacted or not. **Report them in full regardless.**
+
+What they affect is everything sourced from the conversation — the Headline
+rationale, the *why* behind Landed items, narrative, and test outcomes. When
+either check trips, **say so plainly and drop those sections** rather than
+writing them from what little you have:
+
+> Metered session `a1b2c3d4` — not this one. Numbers below are complete; the
+> narrative and *why* sections are unavailable, because this session never saw
+> that conversation.
+
+> This session was compacted once, dropping ~260k tokens. Everything below the
+> numbers covers only what remained in context.
+
+`session.ai_title` still works in both cases — it is carried by the meter, so
+the Headline keeps a real source. Treat it as a label for what the session was
+*about*, never as evidence that anything landed.
+
+The failure this prevents is the one this whole skill exists to avoid: a
+confident summary built on a fraction of the session reads exactly like one
+built on all of it.
+
 ## 4. Summarize
 
 **Read `../lastcall-shared/references/summary.md` and follow it.** It is the

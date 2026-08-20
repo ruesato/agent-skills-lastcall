@@ -17,15 +17,38 @@ inside an intention and an accomplishment read almost identically.
 
 So the sources have fixed roles, and they are not interchangeable:
 
-| Source | Answers | Never used for |
-|---|---|---|
-| Meter output | **what** happened | why it happened |
-| Evidence drop-box | **what** completed | anything unverified |
-| `openloops.sh` | **what** is unfinished | — |
-| The transcript | **why** it went that way | what happened |
+| Source | Answers | Never used for | Where it comes from |
+|---|---|---|---|
+| Meter output | **what** happened | why it happened | `meter-session.sh`, any session |
+| Evidence drop-box | **what** completed | anything unverified | `<session>/evidence/*.json` |
+| `openloops.sh` | **what** is unfinished | — | git state, any session |
+| `session.ai_title` | **what it was about** | that anything landed | the transcript, any session |
+| The conversation | **why** it went that way | what happened | **your own context only** |
 
-If a claim can't be traced to one of the first three, it doesn't go under
+If a claim can't be traced to one of the first four, it doesn't go under
 **Landed**. It can go under *narrative* — clearly marked as such — or nowhere.
+
+### The last row is not a file
+
+The first four rows are read from disk and are complete for **any** session id.
+The last one is not read at all — it is in your context because `/lastcall`
+normally runs inside the session it is measuring. Nothing hands it to you, and
+no script in this project reads conversation content.
+
+That makes the last row the only source that can silently vanish:
+
+- **You are metering a different session.** If the id you metered is not
+  `${CLAUDE_SESSION_ID}`, you have never seen that conversation. Not a
+  degraded view of it — none of it.
+- **The session was compacted.** `context.compactions` is greater than
+  zero and `dropped_tokens` says how much left the window. The transcript on
+  disk is still whole; your view of it is not.
+
+**In both cases say so, and drop the sections that depended on it.** The
+failure to avoid is a confident narrative built on a fraction of the session,
+because that reads exactly like one built on all of it. The quantitative
+sections are unaffected and should be reported in full — the numbers come from
+the transcript, which is complete either way.
 
 ---
 
@@ -33,8 +56,11 @@ If a claim can't be traced to one of the first three, it doesn't go under
 
 ### Headline
 
-One sentence naming what this session was actually about. The transcript's
-`ai-title` entries are cheap input here.
+One sentence naming what this session was actually about. `session.ai_title`
+is Claude Code own generated title for the session, carried through by the
+meter — cheap, available for any session id, and the one qualitative input
+that survives compaction. It is a **label, not evidence**: it says what the
+session was about, never that anything was finished.
 
 ### Landed
 
@@ -83,9 +109,11 @@ produces. From `openloops.sh`:
 
 **Test state is deliberately not automated.** Transcripts record `is_error` on
 tool results, but a test command that exits non-zero is indistinguishable from
-a grep that found nothing. Read the transcript for test outcomes and report
-what you actually find, or say nothing — do not infer a pass or a failure from
-exit codes alone.
+a grep that found nothing. Report test outcomes you actually saw run, or say
+nothing — do not infer a pass or a failure from exit codes alone. "Saw" means
+in your own context: nothing reads test output from disk, so if you are
+metering another session, or the run happened before a compaction, you did not
+see it and there is nothing to report.
 
 ### Friction
 

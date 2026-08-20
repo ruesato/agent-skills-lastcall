@@ -371,6 +371,51 @@ if CLAUDE_PROJECTS="$TROOT" LASTCALL_STATUSLINE_DIR="$TROOT/cap" \
 then ok; else bad "a multi-document capture file took down the meter"; fi
 rm -rf "$TROOT"
 
+# 3c. Compaction and the session title. Both are transcript facts that decide
+# how much of a session a summary can honestly claim to cover, so both are
+# pinned in each direction.
+CROOT="$(mktemp -d "$TMP/lastcall-compact.XXXXXX")"
+mkdir -p "$CROOT/-fixture-ctx"
+{ jq -cn '{type: "assistant", requestId: "c1", timestamp: "2026-08-19T09:00:00.000Z",
+      cwd: "/", gitBranch: "main",
+      message: {model: "claude-opus-5", usage: {input_tokens: 1, output_tokens: 5}}}'
+  jq -cn '{type: "ai-title", aiTitle: "Fixture session title"}'
+  jq -cn '{type: "system", subtype: "compact_boundary", timestamp: "2026-08-19T09:00:10.000Z",
+      compactMetadata: {trigger: "manual", preTokens: 100, postTokens: 10,
+                        cumulativeDroppedTokens: 90, durationMs: 5}}'
+} > "$CROOT/-fixture-ctx/fixture-ctx.jsonl"
+ctx_out="$(CLAUDE_PROJECTS="$CROOT" "$S/meter-session.sh" fixture-ctx 2>/dev/null)"
+if printf '%s' "$ctx_out" | jq -e '.context.compactions == 1
+      and .context.dropped_tokens == 90
+      and .context.triggers == ["manual"]
+      and .session.ai_title == "Fixture session title"' >/dev/null 2>&1
+then ok; else bad "meter did not report compaction or the session title"; fi
+# No compaction is a MEASUREMENT, not an absence: the whole transcript was read
+# and none was found, so zero is the honest answer and the key must be present.
+# An absent title is the opposite - unmeasured, so null.
+printf '%s\n' "$(jq -cn '{type: "assistant", requestId: "c2",
+    timestamp: "2026-08-19T09:00:00.000Z", cwd: "/", gitBranch: "main",
+    message: {model: "claude-opus-5", usage: {input_tokens: 1, output_tokens: 5}}}')" \
+  > "$CROOT/-fixture-ctx/fixture-plain.jsonl"
+if CLAUDE_PROJECTS="$CROOT" "$S/meter-session.sh" fixture-plain 2>/dev/null \
+     | jq -e '.context.compactions == 0 and .context.dropped_tokens == 0
+              and .session.ai_title == null' >/dev/null 2>&1
+then ok; else bad "meter did not report an uncompacted session as measured zero"; fi
+rm -rf "$CROOT"
+
+# The doctrine that acts on those fields has to actually be present, in both
+# skills and in the shared reference. This is a documentation check on purpose:
+# the fix for a silently-degrading summary IS the instruction, and a fixture
+# that only pinned the meter fields would pass with the guidance deleted.
+for doc in skills/lastcall/SKILL.md skills/lastcall-shared/references/summary.md; do
+  if grep -q 'CLAUDE_SESSION_ID' "$HERE/$doc" && grep -q 'compact' "$HERE/$doc"
+  then ok; else bad "$doc lost the self-metering or compaction guidance"; fi
+done
+# summary.md must not claim a transcript source that nothing supplies. The
+# conversation row has to name context as its origin, not a file.
+if grep -q 'own context only' "$HERE/skills/lastcall-shared/references/summary.md"
+then ok; else bad "summary.md no longer marks the conversation as context-only"; fi
+
 # 4. Bash-only editing. work.files is built from edit tool calls, so a session
 # that edits through Bash reports {} — and an empty map has to be readable as
 # "unmeasured" rather than "nothing was touched". The flag is what carries that

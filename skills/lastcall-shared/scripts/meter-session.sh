@@ -140,10 +140,23 @@ meter_file() {
     | ( map(select(.type == "assistant") | .message.content[]?
             | select(.type == "tool_use")) ) as $tools
 
+    # Compaction boundaries. Claude Code writes one system/compact_boundary
+    # record per compaction, carrying how many tokens were dropped from the
+    # context window. This is the only way to know that the agent summarizing a
+    # session can no longer SEE all of it - the transcript on disk is complete,
+    # the context it is being read from is not.
+    | ( map(select(.type == "system" and .subtype == "compact_boundary")) ) as $cb
+
     | {
         lane: $lane,
         cwd:     (map(.cwd // empty)       | first),
         branch:  (map(.gitBranch // empty) | last),
+        # Claude Code own generated title for the session. A LABEL, not content
+        # - it names what the session was about without carrying any of the
+        # conversation, so it costs nothing to read and cannot be mistaken for
+        # evidence that work landed. summary.md points at it for the Headline;
+        # this is what makes that instruction real.
+        ai_title: (map(select(.type == "ai-title") | .aiTitle // empty) | last),
         first_ts: ($ts | first), last_ts: ($ts | last), active_s: $active,
         agent_s:     (($td | map(.durationMs) | add // 0) / 1000),
         agent_turns: ($td | length),
@@ -206,6 +219,10 @@ meter_file() {
                            | map(select(.name == "Edit" or .name == "Write"
                                         or .name == "NotebookEdit")) | length ),
         bash_calls: ( $tools | map(select(.name == "Bash")) | length ),
+        compactions: ($cb | length),
+        # cumulativeDroppedTokens is cumulative, so the largest is the total.
+        dropped_tokens: ($cb | map(.compactMetadata.cumulativeDroppedTokens // 0) | max // 0),
+        compact_triggers: ($cb | map(.compactMetadata.trigger // "unknown") | unique),
         friction: {
           # is_error is tri-state; null means the field is absent, not an error.
           tool_errors: ( map(select(.type=="user") | .message.content[]?
@@ -271,7 +288,10 @@ meter_file() {
         # only for turns that have ENDED, so this is a floor: a session metered
         # mid-turn is missing the turn being metered.
         agent_s:     (map(select(.lane=="main") | .agent_s)     | add // 0),
-        agent_turns: (map(select(.lane=="main") | .agent_turns) | add // 0)
+        agent_turns: (map(select(.lane=="main") | .agent_turns) | add // 0),
+        # null when the session never got a title, which is unmeasured rather
+        # than untitled. Latest wins: a split session carries the earlier one.
+        ai_title: (map(select(.lane=="main") | .ai_title | select(.)) | last)
       },
       # Grouped by (model, lane, speed, service_tier). The last two are pricing
       # dimensions; the lane split is there because main threads and subagents
@@ -317,6 +337,16 @@ meter_file() {
                     cache_w_5m: (map(.cache_w_5m) | add),
                     cache_w_1h: (map(.cache_w_1h) | add)
                   }) | sort_by(-(.output)) )
+      },
+      # How much of this session is still VISIBLE to whoever is summarizing it.
+      # Unlike the native block, zero here is a measurement rather than an
+      # absence: every entry of every transcript was read and no compaction
+      # boundary was found. Main lanes only - a subagent compacting its own
+      # context does not cost the main thread anything.
+      context: {
+        compactions:    (map(select(.lane=="main") | .compactions)    | add // 0),
+        dropped_tokens: (map(select(.lane=="main") | .dropped_tokens) | max // 0),
+        triggers:       ([ map(select(.lane=="main") | .compact_triggers) | .[][]? ] | unique)
       },
       friction: {
         tool_errors: (map(.friction.tool_errors) | add),

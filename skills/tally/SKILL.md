@@ -205,6 +205,26 @@ and give the Bash call count if the user wants the detail.
 This does not affect anything else. Cost, tokens, time, friction, and skill
 attribution are all still exact — only the per-file breakdown degrades.
 
+## 7. Metering another session, and compaction
+
+Neither affects anything `tally` reports. Every number here is read from the
+transcript and the git tree, so it is complete and correct for any session id,
+compacted or not — `tally` is quantitative by design and has no narrative half
+to lose. This is the one place where doing less is a guarantee rather than a
+limitation.
+
+Two small things worth surfacing anyway:
+
+- When the metered id is not `${CLAUDE_SESSION_ID}`, name the session you
+  measured. "tally · 47m active · $4.18" silently attributed to the wrong
+  session is a confusing readout even when every figure in it is right.
+- `context.compactions > 0` is worth a word when the user asks for detail: it
+  explains a large token total, and `context.dropped_tokens` is how much left
+  the window.
+
+If the user wants a narrative rather than numbers, that is `lastcall`, and
+`lastcall` has its own rules about when it can honestly produce one.
+
 ## Notes
 
 Report what the meter measured, nothing more. Do not infer productivity from

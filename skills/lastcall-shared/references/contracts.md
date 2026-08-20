@@ -70,7 +70,13 @@ downstream from `references/pricing.md` so this contract stays correct.
     // has not been written yet, so a session metered mid-turn is missing it,
     // and a session that has never completed a turn reports 0.
     "agent_s":     4177.8,
-    "agent_turns": 17     // completed user turns that contributed to agent_s
+    "agent_turns": 17,    // completed user turns that contributed to agent_s
+
+    // Claude Code own generated title. A LABEL, not evidence: it says what the
+    // session was about, never that anything landed. null when the session
+    // never got one. The only qualitative input available for a session the
+    // reader was not present for.
+    "ai_title": "Support multiple code forges in skill project"
   },
 
   // One row per (model, lane, speed, service_tier). Never collapse these:
@@ -113,6 +119,14 @@ downstream from `references/pricing.md` so this contract stays correct.
         "cache_read": 4049677, "cache_w_5m": 0, "cache_w_1h": 361355 }
     ]
   },
+
+  // How much of the session is still visible to whoever is summarizing it.
+  // Unlike `native`, ZERO here is a measurement, not an absence: every entry of
+  // every transcript was read and no compaction boundary was found. Read from
+  // system/compact_boundary records. Main lanes only — a subagent compacting
+  // its own context costs the main thread nothing.
+  "context": { "compactions": 1, "dropped_tokens": 260337,
+               "triggers": ["manual"] },
 
   "friction": { "tool_errors": 7, "interrupts": 1, "denials": 0 },
 
@@ -192,19 +206,27 @@ Each of these silently corrupts totals if a reimplementation drops it:
 8. **`thinking` is a subset of `output`, not a sixth bucket.** Adding it to a
    total double-counts. It exists so a jump in output tokens can be told apart
    from a jump in reasoning.
-9. **An empty `work.files` is not a claim that nothing was edited.** Read
+9. **Nothing here reads conversation content.** The meter dips into
+   `message.content` exactly twice and both are filtered to structure —
+   `tool_use` names and paths, and `tool_result.is_error`. No prompts, no
+   assistant prose, no tool output bodies. Any narrative in a summary comes
+   from the reader own context, which is present only when `lastcall` runs
+   inside the session it measures. `context.compactions` and a metered id that
+   differs from the current one are the two ways that silently stops being
+   true; `session.ai_title` is the only qualitative field that survives both.
+10. **An empty `work.files` is not a claim that nothing was edited.** Read
    `work.files_coverage.attributed` first. When it is false, the file-level
    view is unmeasured and any ratio over it is a fabrication rather than an
    approximation. Note for consumers: `attributed` is a real boolean, so
    defaulting it with jq `//` inverts it — `false // true` is `true`.
-10. **`native` is absent unless captured, and never emitted with zeroes.** A
+11. **`native` is absent unless captured, and never emitted with zeroes.** A
    missing field there means unmeasured. Reporting an absent rate-limit window
    as 0% tells the user they have a full window left, which is worse than
    reporting nothing. Its `cost_usd` is advisory and never substitutes for the
    figure `cost.sh` derives from tokens; `cost.sh` compares them in
    `cross_check` and refuses the comparison outright when `native.wall_ms`
    shows their clock covers less time than the transcript does.
-11. **`agent_s` is a floor, never a replacement for `active_s`.** They measure
+12. **`agent_s` is a floor, never a replacement for `active_s`.** They measure
    different things — agent busy versus human engaged — and only `active_s`
    covers the turn currently in flight.
 
