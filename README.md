@@ -57,6 +57,56 @@ Every claim in a summary must trace to an artifact — a file path, a commit SHA
 a task id, a test result. Transcripts are full of intentions that never landed,
 so nothing is ever summarized from conversational narrative alone.
 
+## Optional: capture the status line
+
+Two things Claude Code knows about a session appear nowhere in a transcript:
+how much of your **5-hour and 7-day rate-limit windows** you have consumed, and
+Claude Code's own estimate of what the session cost. Both arrive on stdin to
+whatever command you configure as your status line.
+
+`capture-statusline.sh` is a pass-through filter. It writes that payload where
+the meter can find it and copies stdin to stdout unchanged, so it **composes
+with a status line you already have** rather than replacing it:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.lastcall/bin/capture-statusline.sh | ~/.claude/statusline.sh"
+  }
+}
+```
+
+If you have no status line and only want the capture, send its output to
+`/dev/null` — a status line that prints nothing still runs:
+
+```json
+{ "statusLine": { "type": "command",
+                  "command": "~/.lastcall/bin/capture-statusline.sh > /dev/null" } }
+```
+
+**`install.sh` will never write this for you.** `statusLine` is a single object
+per settings file and a higher-precedence scope replaces it wholesale — only
+permission rules merge across scopes — so installing one would silently destroy
+a status line you built. And configuring a status line where you had none
+suppresses most of the footer's keyboard hints, including `esc to interrupt`. A
+metering skill has no business doing either. Adding the line is your call; the
+install only puts the script on a stable path.
+
+What it is worth knowing before you opt in:
+
+- **Rate limits are subscriber-only.** They appear for Claude.ai Pro/Max
+  accounts, and only after the first API response. On an API key you get the
+  cost and timing fields and nothing else.
+- **Doing nothing costs you nothing.** With no capture the meter omits the
+  `native` block entirely. It is never emitted with zeroes, because "0% of your
+  weekly window used" and "we did not measure it" are opposite claims.
+- **It runs on every assistant message.** The script writes via a temp file and
+  an atomic rename, because Claude Code cancels an in-flight status line script
+  when a new update fires; it prunes captures older than a week; and every error
+  path exits 0 after passing stdin through, so it cannot break your status line.
+- **Captures live in `~/.claude/lastcall/statusline/<session-id>.json`.**
+
 ## Development
 
 This is a shell + jq project. There is no `package.json` and no build step.

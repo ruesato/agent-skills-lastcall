@@ -185,6 +185,84 @@ then ok; else bad "meter cannot resolve a transcript under a renamed project dir
 if CLAUDE_PROJECTS="$FROOT" "$S/meter-session.sh" fixture-absent >/dev/null 2>&1
 then bad "meter succeeded on a nonexistent session id"; else ok; fi
 rm -rf "$FROOT"
+
+# 3. The statusLine capture. Both paths matter and only one of them shows up in
+# the sweep: almost no session has a capture, so "absent" is well covered by
+# accident and "present" is covered by nothing. The dangerous direction is a
+# session with no capture reporting 0% of a rate-limit window, which reads as a
+# full window left rather than as unmeasured.
+CAPD="$(mktemp -d -t lastcall-cap)"
+CAPSID="$(jq -rs '.[0].session_id' "$LEDGER" 2>/dev/null)"
+if [ -n "$CAPSID" ] && [ "$CAPSID" != "null" ]; then
+  CAPCWD="$(jq -rs --arg s "$CAPSID" 'map(select(.session_id == $s)) | .[0].cwd' "$LEDGER")"
+
+  meter_cap() {  # meter_cap <capture-dir>; meters CAPSID with that store
+    (cd "$CAPCWD" && LASTCALL_STATUSLINE_DIR="$1" "$S/meter-session.sh" "$CAPSID" 2>/dev/null)
+  }
+
+  # Absent capture: the block must be missing entirely, not present and empty.
+  if meter_cap "$CAPD" | jq -e 'has("native") | not' >/dev/null 2>&1; then ok
+  else bad "meter emitted a native block with no capture present"; fi
+
+  # Present capture: every field lands, and rate_limits survives intact.
+  jq -cn --arg sid "$CAPSID" '{schema: "lastcall.statusline/1",
+      captured_at: "2026-08-19T23:00:00Z",
+      payload: {session_id: $sid, version: "0.0.0",
+        cost: {total_cost_usd: 1.25, total_duration_ms: 60000,
+               total_api_duration_ms: 1000, total_lines_added: 5,
+               total_lines_removed: 1},
+        rate_limits: {five_hour: {used_percentage: 23.5, resets_at: 1738425600},
+                      seven_day: {used_percentage: 41.2, resets_at: 1738857600}}}}' \
+    > "$CAPD/$CAPSID.json"
+  if meter_cap "$CAPD" | jq -e '.native.cost_usd == 1.25
+        and .native.rate_limits.five_hour.used_percentage == 23.5
+        and .native.rate_limits.seven_day.resets_at_utc == "2025-02-06T16:00:00Z"' \
+       >/dev/null 2>&1
+  then ok; else bad "meter did not read a present statusline capture"; fi
+
+  # A payload with no rate_limits must drop the key rather than zero it. This is
+  # the API-key user, who legitimately has nothing here.
+  jq -cn --arg sid "$CAPSID" '{schema: "lastcall.statusline/1",
+      captured_at: "2026-08-19T23:00:00Z",
+      payload: {session_id: $sid, cost: {total_cost_usd: 1.25}}}' > "$CAPD/$CAPSID.json"
+  if meter_cap "$CAPD" | jq -e '(.native | has("rate_limits")) | not' >/dev/null 2>&1
+  then ok; else bad "meter zeroed an absent rate_limits instead of omitting it"; fi
+
+  # A corrupt capture must not take the meter down with it.
+  printf '{"schema":"lastcall.statusline/1","captu' > "$CAPD/$CAPSID.json"
+  if meter_cap "$CAPD" | jq -e '.session.id and (has("native") | not)' >/dev/null 2>&1
+  then ok; else bad "a corrupt statusline capture broke the meter"; fi
+
+  # A capture belonging to another session must be ignored, not attributed.
+  jq -cn '{schema: "lastcall.statusline/1", captured_at: "2026-08-19T23:00:00Z",
+      payload: {session_id: "someone-else", cost: {total_cost_usd: 999}}}' \
+    > "$CAPD/$CAPSID.json"
+  if meter_cap "$CAPD" | jq -e 'has("native") | not' >/dev/null 2>&1
+  then ok; else bad "meter attributed another session capture to this one"; fi
+  rm -f "$CAPD/$CAPSID.json"
+fi
+
+# The capture script itself, independent of any session. It sits in the status
+# line of whoever opts in, so the contract is that it cannot break one: stdin
+# reaches stdout byte for byte, and every failure path still exits 0.
+CAPPAY='{"session_id":"fixture-cap","cost":{"total_cost_usd":0.5}}'
+if printf '%s' "$CAPPAY" | LASTCALL_STATUSLINE_DIR="$CAPD" \
+     "$S/capture-statusline.sh" 2>/dev/null | diff -q - <(printf '%s' "$CAPPAY") >/dev/null
+then ok; else bad "capture-statusline.sh altered the byte stream passing through"; fi
+if jq -e '.schema == "lastcall.statusline/1" and .payload.session_id == "fixture-cap"' \
+     "$CAPD/fixture-cap.json" >/dev/null 2>&1
+then ok; else bad "capture-statusline.sh did not write a well-formed capture"; fi
+# Garbage in, and an id that would escape the store, must both exit 0 writing
+# nothing. A status line that dies on malformed input is worse than no capture.
+if printf 'not json' | LASTCALL_STATUSLINE_DIR="$CAPD" "$S/capture-statusline.sh" \
+     >/dev/null 2>&1; then ok
+else bad "capture-statusline.sh exited non-zero on unparseable stdin"; fi
+if printf '%s' '{"session_id":"../../escaped"}' \
+     | LASTCALL_STATUSLINE_DIR="$CAPD" "$S/capture-statusline.sh" >/dev/null 2>&1 \
+   && [ ! -e "$CAPD/../../escaped.json" ]
+then ok; else bad "capture-statusline.sh let a session id escape the store"; fi
+rm -rf "$CAPD"
+
 say "  fixtures checked"
 
 # ---------------------------------------------------------------- result

@@ -29,7 +29,7 @@ version: 2
 scanner_version: 2.9.5
 rules: []
 fingerprints:
-- hash: sha256:9ae64581bd429c578d86c56d2868adc49e52c46e317823bf914a23eb6c7cd0a7
+- hash: sha256:b9437b5b04b282e7586330ecf827ef53bf64b0df5fb3c73df3ee41903000b0f6
   rule_id: RA2
   file: SKILL.md
   reason: >-
@@ -40,9 +40,12 @@ fingerprints:
     does not modify any file." The static pattern keys on the
     ledger/memories/state vocabulary and cannot read the negation, so it
     flagged the guarantee as the violation (confidence 0.6).
-    Re-reviewed 2026-08-19 after unrelated edits to this file (the
-    native-metering readout) invalidated the previous hash: same rule, same
-    paragraph, same confidence, paragraph text unchanged. Verified at
+    Re-reviewed twice on 2026-08-19, both times after unrelated edits to this
+    file invalidated the previous hash, and both times the excused paragraph
+    itself was untouched: first for the native-metering readout, then for the
+    statusline "Native signals" section appended at the end of the file (49
+    added lines, 0 deleted — confirmed with git diff --stat). Same rule, same
+    paragraph, same confidence 0.6, same finding text each time. Verified at
     source: tally's SKILL.md defines no write path of any kind, and
     skills/lastcall-shared/scripts/ledger.sh:11 states "Written by lastcall
     only. tally never writes." Writing is the difference between the two

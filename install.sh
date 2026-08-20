@@ -16,7 +16,15 @@ SKILLS=(lastcall tally lastcall-shared)
 
 # Every script a skill invokes by bare name. rates.json is NOT listed: cost.sh
 # resolves its own symlink and reads the rate table from beside the real file.
-BINSCRIPTS=(meter-session.sh cost.sh ledger.sh openloops.sh doctrine-check.sh)
+# capture-statusline.sh is here so a user who opts in has a stable path to point
+# their status line at. Putting it on PATH is the whole of the install: this
+# script never reads or writes settings.json. A statusLine is a single object
+# per settings file and a higher-precedence scope replaces it wholesale, so
+# writing one would destroy a status line the user built, and giving one to a
+# user who had none suppresses footer keyboard hints including "esc to
+# interrupt". Opting in is one line the user adds themselves — see the README.
+BINSCRIPTS=(meter-session.sh cost.sh ledger.sh openloops.sh doctrine-check.sh
+            capture-statusline.sh)
 
 # Fixed absolute home for the scripts. Kiro has no skill-directory variable, so
 # a relative path from a SKILL.md cannot be executed there — the skills fall

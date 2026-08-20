@@ -104,9 +104,57 @@ downstream from `references/pricing.md` so this contract stays correct.
 
   "friction": { "tool_errors": 7, "interrupts": 1, "denials": 0 },
 
-  "evidence": []                                     // filled from contract 2
+  "evidence": [],                                    // filled from contract 2
+
+  // OPTIONAL, and absent on most sessions. Present only when the opt-in
+  // statusLine capture (capture-statusline.sh) wrote a payload for this
+  // session id. Every field inside is likewise dropped when absent rather than
+  // zeroed: rate_limits exist only for Pro/Max subscribers and only after the
+  // first API response, and "0% of the weekly window used" is the opposite
+  // claim from "not measured".
+  "native": {
+    "source":      "statusline",
+    "captured_at": "2026-08-19T18:22:03Z",  // last status line render, NOT live
+    "cc_version":  "2.1.236",
+
+    "cost_usd":      0.6512,   // Claude Code client-side estimate. ADVISORY.
+    "wall_ms":       450000,   // its clock; resets when /clear starts a session
+    "api_ms":        231000,   // time spent waiting on the API
+    "lines_added":   156,      // derived from EDIT TOOL CALLS, so a Bash
+    "lines_removed": 23,       // heredoc edit contributes nothing — measured,
+                               // see agent-skill-wrapup-yg3.8
+
+    // The only local source for these. They are in no transcript, no hook
+    // payload, and no OTel metric. resets_at is epoch seconds as sent.
+    "rate_limits": {
+      "five_hour": { "used_percentage": 23.5, "resets_at": 1738425600,
+                     "resets_at_utc": "2025-02-01T16:00:00Z" },
+      "seven_day": { "used_percentage": 41.2, "resets_at": 1738857600,
+                     "resets_at_utc": "2025-02-06T16:00:00Z" }
+    },
+
+    // agent_s minus API wait: time spent RUNNING TOOLS. Both inputs are floors
+    // captured at different moments, so this is approximate by construction.
+    // clamped means the subtraction went negative and tool_s was floored at 0.
+    "split": { "api_s": 231.0, "tool_s": 84.3,
+               "clamped": false, "approximate": true }
+  }
 }
 ```
+
+### The statusline capture store
+
+Written by `capture-statusline.sh`, read by the meter. One file per session:
+
+```
+~/.claude/lastcall/statusline/<session-id>.json
+{ "schema": "lastcall.statusline/1", "captured_at": "...", "payload": { ... } }
+```
+
+`payload` is the statusLine JSON verbatim. The meter rejects a file whose
+`payload.session_id` does not match the id being metered, and treats an
+unparseable file as absent. The capture is opt-in and `install.sh` never
+configures it — see the README for why.
 
 ### Invariants the meter guarantees
 
@@ -132,7 +180,14 @@ Each of these silently corrupts totals if a reimplementation drops it:
 8. **`thinking` is a subset of `output`, not a sixth bucket.** Adding it to a
    total double-counts. It exists so a jump in output tokens can be told apart
    from a jump in reasoning.
-9. **`agent_s` is a floor, never a replacement for `active_s`.** They measure
+9. **`native` is absent unless captured, and never emitted with zeroes.** A
+   missing field there means unmeasured. Reporting an absent rate-limit window
+   as 0% tells the user they have a full window left, which is worse than
+   reporting nothing. Its `cost_usd` is advisory and never substitutes for the
+   figure `cost.sh` derives from tokens; `cost.sh` compares them in
+   `cross_check` and refuses the comparison outright when `native.wall_ms`
+   shows their clock covers less time than the transcript does.
+10. **`agent_s` is a floor, never a replacement for `active_s`.** They measure
    different things — agent busy versus human engaged — and only `active_s`
    covers the turn currently in flight.
 

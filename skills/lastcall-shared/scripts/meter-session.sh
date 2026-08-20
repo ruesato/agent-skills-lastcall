@@ -60,6 +60,27 @@ fi
 SUBS=("$PROJ/$SID/subagents"/*.jsonl)
 [ -e "${SUBS[0]}" ] || SUBS=()
 
+# Optional: the statusLine capture written by capture-statusline.sh. It is the
+# only local source for rate_limits, which appear nowhere in a transcript, plus
+# Claude Code own cost estimate and its API-wait total.
+#
+# Absence is the NORMAL case, not an error: the capture is opt-in, and even with
+# it configured rate_limits only appear for Pro/Max subscribers after the first
+# API response. A corrupt or foreign file is treated as absent too. Everything
+# downstream omits the native block entirely rather than emitting zeroes — a
+# session reporting 0% of the rate limit used would read as plenty of headroom.
+CAPFILE="${LASTCALL_STATUSLINE_DIR:-$HOME/.claude/lastcall/statusline}/$SID.json"
+CAP=null
+if [ -f "$CAPFILE" ]; then
+  # The filename is the session id, but the payload is checked against it too:
+  # a store copied between machines, or a mangled write, must not be attributed
+  # to the session being metered.
+  CAP="$(jq -c --arg sid "$SID" \
+        'select(.schema == "lastcall.statusline/1" and .payload.session_id == $sid)' \
+        "$CAPFILE" 2>/dev/null)" || CAP=null
+  [ -n "$CAP" ] || CAP=null
+fi
+
 # Subagent identities, from the .meta.json sidecars.
 agents_json() {
   local out="[]" m
@@ -181,12 +202,20 @@ meter_file() {
     [ -f "$f" ] && meter_file "$f" subagent
   done
   true
-} | jq -s --arg sid "$SID" --argjson agents "$(agents_json)" '
+} | jq -s --arg sid "$SID" --argjson agents "$(agents_json)" --argjson cap "$CAP" '
     # Merge a list of {key: count} maps by SUMMING. Object "+" overwrites
     # duplicate keys rather than summing them, which is the trap this exists
     # to avoid — see CLAUDE.md.
     def sum_maps: [ .[] | to_entries[] ] | group_by(.key)
                   | map({ (.[0].key): (map(.value) | add) }) | add // {};
+
+    # Drop keys whose value is null, and objects left empty by that drop. Used
+    # only for the native block, where a missing field means UNMEASURED and must
+    # vanish rather than surface as a zero. walk is bottom-up, so an object
+    # emptied by the inner pass is removed by the outer one.
+    def prune: walk(if type == "object"
+                    then with_entries(select(.value != null and .value != {}))
+                    else . end);
 
     { session: {
         id: $sid,
@@ -246,4 +275,60 @@ meter_file() {
       },
       # Slot for external work evidence (Fathom et al). Populated downstream.
       evidence: []
-    }'
+    }
+
+    # ---------------------------------------------------------------- native
+    # Signals Claude Code measured itself, from the statusLine capture. Folded
+    # in ONLY when a capture exists and matched; otherwise the key is absent.
+    # Never emitted with zeroes — see the CAPFILE comment above.
+    | if $cap == null then . else
+        . as $out
+        | ($cap.payload) as $p
+        | ($out.session.agent_s) as $agent
+        | (($p.cost.total_api_duration_ms // null)) as $apims
+        | . + { native: ({
+              source:      "statusline",
+              captured_at: $cap.captured_at,
+              cc_version:  $p.version,
+
+              # Claude Code own client-side cost estimate. ADVISORY: it is
+              # documented as an estimate that may differ from the bill, and it
+              # resets to 0 when /clear starts a new session. Never substituted
+              # for the figure cost.sh derives from tokens.
+              cost_usd:      $p.cost.total_cost_usd,
+              wall_ms:       $p.cost.total_duration_ms,
+              api_ms:        $apims,
+              lines_added:   $p.cost.total_lines_added,
+              lines_removed: $p.cost.total_lines_removed,
+
+              # Subscriber-only, and only after the first API response. For a
+              # Max plan this is the constraint that actually binds, which no
+              # dollar figure expresses. resets_at arrives as epoch seconds.
+              rate_limits: ( $p.rate_limits
+                | { five_hour: { used_percentage: .five_hour.used_percentage,
+                                 resets_at:       .five_hour.resets_at,
+                                 resets_at_utc:   (.five_hour.resets_at
+                                                   | if . == null then null
+                                                     else todateiso8601 end) },
+                    seven_day: { used_percentage: .seven_day.used_percentage,
+                                 resets_at:       .seven_day.resets_at,
+                                 resets_at_utc:   (.seven_day.resets_at
+                                                   | if . == null then null
+                                                     else todateiso8601 end) } } ),
+
+              # agent_s minus API wait is time spent RUNNING TOOLS — the
+              # difference between a slow model and a slow test suite, which no
+              # other number here expresses. Both inputs are floors measured at
+              # different moments: agent_s omits the turn in flight, api_ms
+              # comes from the last status line render. So the split is
+              # approximate, and the subtraction can legitimately go negative,
+              # which is clamped and flagged rather than reported as nonsense.
+              split: ( if $agent != null and $agent > 0 and $apims != null
+                       then ($apims / 1000) as $api
+                            | { api_s:  ($api      | . * 10 | round / 10),
+                                tool_s: ([$agent - $api, 0] | max | . * 10 | round / 10),
+                                clamped:     (($agent - $api) < 0),
+                                approximate: true }
+                       else null end )
+            } | prune) }
+      end'

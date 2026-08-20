@@ -92,6 +92,54 @@ against, so an unflagged understatement contaminates every later comparison.
 skill rather than by model. The `skill: null` row is the unattributed
 remainder — plain conversational turns — not a skill named null.
 
+### Native signals — only when `.native` is present
+
+`meter-session.sh` emits a `native` block **only** when the optional statusLine
+capture exists for this session (see the README). Most sessions will not have
+it, and then the key is absent entirely.
+
+**Absent means unmeasured. Never report a missing number as zero**, and never
+reconstruct one of these from something else. A session that reports "0% of the
+5-hour window used" tells the user they have the whole window left, which is a
+worse outcome than saying nothing at all.
+
+- **`native.rate_limits`** — the payoff. `five_hour` and `seven_day` each carry
+  `used_percentage` and `resets_at` (epoch seconds, with `resets_at_utc`
+  alongside). **Convert the reset to the user local time** before reporting it:
+  `date -r <epoch>` on macOS, `date -d @<epoch>` on Linux.
+
+  Report it as the constraint that actually binds. On a Max plan the real cost
+  of a session is a slice of the window, not a dollar figure, and `resets_at`
+  is what makes it actionable at close:
+
+  > 71% of the weekly window used, resets Thursday 09:00
+
+  Each window can be absent on its own. Rate limits appear only for Pro/Max
+  subscribers and only after the first API response, so a user on an API key
+  legitimately has nothing here — say nothing rather than inventing a 0%.
+
+- **`native.split`** — `api_s` is time spent waiting on the model and `tool_s`
+  is time spent running tools, which is the difference between "the model was
+  slow" and "your test suite is slow". Both inputs are floors measured at
+  different moments, so **label it approximate**. When `clamped` is true the
+  subtraction went negative and `tool_s` was floored at 0; say the split is
+  unavailable rather than reporting a zero as a finding.
+
+- **`native.cost_usd`** — Claude Code own client-side estimate. Never report it
+  as the cost; `cost.sh` `total_usd` is the figure. See `cross_check` below.
+
+- **`native.captured_at`** — the capture is only as fresh as the last status
+  line render. If it is materially older than `session.ended`, the numbers lag
+  the session; say so rather than presenting them as current.
+
+`cost.sh` adds a `cross_check` object whenever a native cost figure exists. It
+compares the two independently derived numbers and is **advisory only** — it
+never changes `total_usd`. When `comparable` is false, `skipped_reason` says why
+(a resumed session or a stale capture covers less work than the transcript
+does); report nothing. When `diverged` is true the divergence is already in
+`caveats`, naming both figures — surface it, because the likely cause is a stale
+`rates.json` and that silently contaminates every ledger comparison downstream.
+
 ## 3. Evidence and open loops
 
 ```bash
