@@ -22,8 +22,13 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
   GIT='{"available":false}'
   DIRTY='[]'
   TODOS='[]'
+  GROOT="$CWD"
 else
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+  # git status prints paths relative to the REPO ROOT, which is not $CWD when
+  # the session ran in a subdirectory. Needed to turn them back into absolute
+  # paths that match the ones the meter records.
+  GROOT="$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$CWD")"
 
   # -z with NUL parsing: filenames can contain spaces, quotes, and newlines,
   # and porcelain quotes them when they do. NUL separation sidesteps all of it.
@@ -46,7 +51,15 @@ else
 fi
 
 jq -n --argjson m "$METER" --argjson git "$GIT" --argjson dirty "$DIRTY" \
-      --argjson todos "$TODOS" --argjson cmin "$CHURN_MIN" --argjson ctop "$CHURN_TOP" '
+      --argjson todos "$TODOS" --argjson cmin "$CHURN_MIN" --argjson ctop "$CHURN_TOP" \
+      --arg groot "$GROOT" '
+  # git status prints repo-root-relative paths while the meter records absolute
+  # ones. Matching on a bare endswith would make a dirty "foo.js" look
+  # attributed to an edit of "/elsewhere/barfoo.js", so the separator is part of
+  # the test rather than something trimmed off it.
+  def matches($d): endswith("/" + $d);
+  def abspath($root): $root + "/" + .;
+
   ( $m.session.cwd ) as $cwd
   # The meter records every edited path, including ones outside the project:
   # scratchpad temp files, memory files under ~/.claude. Those are not project
@@ -59,6 +72,7 @@ jq -n --argjson m "$METER" --argjson git "$GIT" --argjson dirty "$DIRTY" \
   | ( ($m.work.files // {} | to_entries | length)
       - ($files | length) ) as $external_files
   | ( $dirty | map(.file) ) as $dirtyfiles
+  | ( $files | map(.key) ) as $editedfiles
   | {
       git: $git,
 
@@ -69,8 +83,8 @@ jq -n --argjson m "$METER" --argjson git "$GIT" --argjson dirty "$DIRTY" \
       # uncommitted — work touched and left unlanded, as distinct from
       # pre-existing drift that was already dirty when the session started.
       session_files_uncommitted:
-        ( $files | map(.key)
-          | map(select(. as $f | $dirtyfiles | any(. as $d | $f | endswith($d)))) ),
+        ( $editedfiles
+          | map(select(. as $f | $dirtyfiles | any(. as $d | $f | matches($d)))) ),
 
       # Repeated edits to one file are a struggle signature — precisely the
       # thing you have forgotten by tomorrow morning. Project files only.
@@ -95,10 +109,13 @@ jq -n --argjson m "$METER" --argjson git "$GIT" --argjson dirty "$DIRTY" \
       # of a Bash edit on its own: a file already dirty when the session started
       # looks identical from here, and the transcript cannot separate them. Read
       # it together with churn_available, which says whether any edit tool ran.
+      # Absolute, matching session_files_uncommitted above: the two are read
+      # side by side and the same concept must not arrive in two path shapes.
       uncommitted_unattributed:
         ( $dirtyfiles
           | map(select(. as $d
-                | ($files | map(.key) | any(. as $f | $f | endswith($d))) | not)) ),
+                | ($editedfiles | any(. as $f | $f | matches($d))) | not))
+          | map(abspath($groot)) ),
 
       # How many edited files were outside the project, so the filtering above
       # is visible rather than silent. Not a hotspot list — just a count.

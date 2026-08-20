@@ -57,6 +57,9 @@ downstream from `references/pricing.md` so this contract stays correct.
     "id":       "f70c6774-635a-434c-b3a5-b540d355c1f8",
     "cwd":      "/Users/you/code/project",
     "branch":   "feat/thing",
+    // null when the transcript carries no parseable timestamp at all, which is
+    // unmeasured rather than epoch zero. Consumers must not feed these to a
+    // date function without checking.
     "started":  "2026-08-03T01:34:38Z",
     "ended":    "2026-08-06T08:46:49Z",
     "wall_s":   285131,   // first to last timestamp; near-meaningless if resumed

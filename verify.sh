@@ -15,10 +15,14 @@ set -uo pipefail        # NOT -e: a failing check must be counted, not fatal
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 S="$HERE/skills/lastcall-shared/scripts"
 PROJECTS="${CLAUDE_PROJECTS:-$HOME/.claude/projects}"
+# Trailing slash stripped: TMPDIR carries one on macOS and every template below
+# would otherwise produce a doubled separator, which then fails exact-path
+# comparisons in the fixtures.
+TMP="${TMPDIR:-/tmp}"; TMP="${TMP%/}"
 
 # Never touch the real baseline. A verification run that pollutes the ledger it
 # is verifying would corrupt every trend comparison downstream.
-LEDGER="$(mktemp -t lastcall-verify)"
+LEDGER="$(mktemp "$TMP/lastcall-verify.XXXXXX")"
 export LASTCALL_LEDGER="$LEDGER"
 trap 'rm -f "$LEDGER"' EXIT
 
@@ -42,7 +46,7 @@ say "  $pass ok"
 
 # ---------------------------------------------------------------- sweep
 say "== transcripts =="
-sessions=0; withsub=0; stale_cwd=0; seen=""
+sessions=0; metered=0; withsub=0; stale_cwd=0; seen=""
 for f in "$PROJECTS"/*/*.jsonl; do
   [ -f "$f" ] || continue
   sid="$(basename "$f" .jsonl)"
@@ -75,6 +79,7 @@ for f in "$PROJECTS"/*/*.jsonl; do
     bad "meter $sid"; continue
   fi
   ok
+  metered=$((metered+1))
   [ "$(printf '%s' "$out" | jq '.agents | length')" -gt 0 ] && withsub=$((withsub+1))
 
   # Native agent-busy time. Always present, always a number, and it cannot
@@ -115,14 +120,19 @@ for f in "$PROJECTS"/*/*.jsonl; do
 done
 say "  $sessions sessions ($withsub with subagents, $stale_cwd with a stale recorded cwd)"
 
-# The sweep must cover every distinct session id on disk. This is the check that
-# would have caught the rename: without it the corpus shrank by a sixth and the
-# run still printed PASS, which is worse than a failure because it looks the
-# same as the day before.
+# Every distinct session id on disk must have produced valid meter output. This
+# is the check the rename evaded: the corpus shrank by a sixth and the run still
+# printed PASS, which is worse than a failure because it looks identical to the
+# day before.
+#
+# It counts SUCCESSFUL meters, not loop iterations. Comparing the iteration
+# count against the same glob it came from is true by construction and would
+# assert nothing; this way a transcript that is skipped, or that meters into
+# garbage, moves the number.
 ondisk="$(for f in "$PROJECTS"/*/*.jsonl; do [ -f "$f" ] && basename "$f" .jsonl; done \
           | sort -u | wc -l | tr -d ' ')"
-if [ "$sessions" = "$ondisk" ]; then ok
-else bad "sweep covered $sessions of $ondisk session ids on disk — transcripts are being dropped"; fi
+if [ "$metered" = "$ondisk" ]; then ok
+else bad "metered $metered of $ondisk session ids on disk — transcripts are being dropped"; fi
 
 # ------------------------------------------------------------ invariants
 say "== invariants =="
@@ -204,7 +214,8 @@ then ok; else bad "cost did not surface unpriced web search requests"; fi
 # 2. A session keeps writing to the project directory it started in, so
 # renaming the working directory strands the transcript under the old slug.
 # Resolution by id has to reach across project directories to find it.
-FROOT="$(mktemp -d -t lastcall-fixture)"
+# Explicit template: GNU mktemp rejects the bare prefix `-t` takes.
+FROOT="$(mktemp -d "$TMP/lastcall-fixture.XXXXXX")"
 mkdir -p "$FROOT/-fixture-old-slug"
 jq -cn --arg cwd "$PWD" '{sessionId: "fixture-renamed", cwd: $cwd,
     gitBranch: "main", type: "user", timestamp: "1970-01-01T00:00:00Z"}' \
@@ -251,13 +262,17 @@ rm -rf "$FROOT"
 # accident and "present" is covered by nothing. The dangerous direction is a
 # session with no capture reporting 0% of a rate-limit window, which reads as a
 # full window left rather than as unmeasured.
-CAPD="$(mktemp -d -t lastcall-cap)"
+CAPD="$(mktemp -d "$TMP/lastcall-cap.XXXXXX")"
 CAPSID="$(jq -rs '.[0].session_id' "$LEDGER" 2>/dev/null)"
 if [ -n "$CAPSID" ] && [ "$CAPSID" != "null" ]; then
-  CAPCWD="$(jq -rs --arg s "$CAPSID" 'map(select(.session_id == $s)) | .[0].cwd' "$LEDGER")"
-
+  # No cd. An earlier draft ran this from the session recorded cwd, which is the
+  # very thing this suite now proves is unreliable — and it duly broke the
+  # moment that directory was removed, taking five checks with it while the
+  # sweep beside it reported the same class of staleness as normal. The meter
+  # resolves a session id across every project directory, so a cwd is not
+  # needed and must not be depended on.
   meter_cap() {  # meter_cap <capture-dir>; meters CAPSID with that store
-    (cd "$CAPCWD" && LASTCALL_STATUSLINE_DIR="$1" "$S/meter-session.sh" "$CAPSID" 2>/dev/null)
+    LASTCALL_STATUSLINE_DIR="$1" "$S/meter-session.sh" "$CAPSID" 2>/dev/null
   }
 
   # Absent capture: the block must be missing entirely, not present and empty.
@@ -302,6 +317,60 @@ if [ -n "$CAPSID" ] && [ "$CAPSID" != "null" ]; then
   rm -f "$CAPD/$CAPSID.json"
 fi
 
+# 3b. Regressions found in review of the split-transcript change, each of which
+# took down the WHOLE meter over one unreadable field.
+#
+# An empty stub file beside a real one. Collecting every matching file made this
+# reachable: jq sorts null below every number, so min over a lane with no
+# timestamps returns null and todateiso8601 then aborts. A rename leaving a stub
+# under the stale slug is exactly how it happens in the field.
+SROOT="$(mktemp -d "$TMP/lastcall-stub.XXXXXX")"
+mkdir -p "$SROOT/-fixture-stub-1" "$SROOT/-fixture-stub-2"
+: > "$SROOT/-fixture-stub-1/fixture-stub.jsonl"
+jq -cn '{type: "assistant", requestId: "s1", timestamp: "2026-08-19T09:00:00.000Z",
+    cwd: "/", gitBranch: "main",
+    message: {model: "claude-opus-5", usage: {input_tokens: 1, output_tokens: 7}}}' \
+  > "$SROOT/-fixture-stub-2/fixture-stub.jsonl"
+if CLAUDE_PROJECTS="$SROOT" "$S/meter-session.sh" fixture-stub 2>/dev/null \
+     | jq -e '([.tokens[].output] | add) == 7 and .session.started != null' >/dev/null 2>&1
+then ok; else bad "an empty transcript stub beside a real one took down the meter"; fi
+# No timestamps anywhere is unmeasured, not epoch zero and not a crash.
+: > "$SROOT/-fixture-stub-2/fixture-notime.jsonl"
+printf '{"type":"user"}\n' > "$SROOT/-fixture-stub-1/fixture-notime.jsonl"
+if CLAUDE_PROJECTS="$SROOT" "$S/meter-session.sh" fixture-notime 2>/dev/null \
+     | jq -e '.session.started == null and .session.wall_s == 0' >/dev/null 2>&1
+then ok; else bad "a session with no timestamps did not report unmeasured"; fi
+rm -rf "$SROOT"
+
+# A capture field of the WRONG TYPE must be unmeasured, exactly like an absent
+# one. These fields are undocumented external input; a resets_at that arrives as
+# a string rather than epoch seconds must not cost the session its token counts.
+TROOT="$(mktemp -d "$TMP/lastcall-badcap.XXXXXX")"
+mkdir -p "$TROOT/proj" "$TROOT/cap"
+jq -cn '{type: "assistant", requestId: "t1", timestamp: "2026-08-19T09:00:00.000Z",
+    cwd: "/", gitBranch: "main",
+    message: {model: "claude-opus-5", usage: {input_tokens: 1, output_tokens: 3}}}' \
+  > "$TROOT/proj/fixture-badcap.jsonl"
+jq -cn '{schema: "lastcall.statusline/1", captured_at: "2026-08-19T23:00:00Z",
+    payload: {session_id: "fixture-badcap",
+      rate_limits: {five_hour: {used_percentage: 12, resets_at: "2026-01-01T00:00:00Z"}}}}' \
+  > "$TROOT/cap/fixture-badcap.json"
+if CLAUDE_PROJECTS="$TROOT" LASTCALL_STATUSLINE_DIR="$TROOT/cap" \
+     "$S/meter-session.sh" fixture-badcap 2>/dev/null \
+     | jq -e '([.tokens[].output] | add) == 3
+              and (.native.rate_limits.five_hour | has("resets_at") | not)' >/dev/null 2>&1
+then ok; else bad "a wrong-typed resets_at took down the meter instead of being dropped"; fi
+# Two JSON documents in one capture file: jq exits 0 emitting both, and passing
+# two values to --argjson aborts the meter. Slurping is what prevents it.
+jq -cn '{schema: "lastcall.statusline/1", captured_at: "2026-08-19T23:00:00Z",
+    payload: {session_id: "fixture-badcap", cost: {total_cost_usd: 2}}}' > "$TROOT/one.json"
+cat "$TROOT/one.json" "$TROOT/one.json" > "$TROOT/cap/fixture-badcap.json"
+if CLAUDE_PROJECTS="$TROOT" LASTCALL_STATUSLINE_DIR="$TROOT/cap" \
+     "$S/meter-session.sh" fixture-badcap 2>/dev/null \
+     | jq -e '.session.id == "fixture-badcap"' >/dev/null 2>&1
+then ok; else bad "a multi-document capture file took down the meter"; fi
+rm -rf "$TROOT"
+
 # 4. Bash-only editing. work.files is built from edit tool calls, so a session
 # that edits through Bash reports {} — and an empty map has to be readable as
 # "unmeasured" rather than "nothing was touched". The flag is what carries that
@@ -311,7 +380,7 @@ bashonly="$(jq -cn '{type: "assistant", requestId: "b1", timestamp: "2026-08-19T
     message: {model: "claude-opus-5",
       usage: {input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0},
       content: [{type: "tool_use", name: "Bash", input: {command: "true"}}]}}')"
-BROOT="$(mktemp -d -t lastcall-bashonly)"
+BROOT="$(mktemp -d "$TMP/lastcall-bashonly.XXXXXX")"
 mkdir -p "$BROOT/-fixture-bash"
 printf '%s\n' "$bashonly" > "$BROOT/-fixture-bash/fixture-bash.jsonl"
 bout="$(CLAUDE_PROJECTS="$BROOT" "$S/meter-session.sh" fixture-bash 2>/dev/null)"
@@ -331,6 +400,29 @@ if printf '%s' "$bout" | jq 'del(.work.files_coverage)' | "$S/openloops.sh" 2>/d
      | jq -e '.churn_available == true' >/dev/null 2>&1
 then ok; else bad "openloops did not default churn_available to true when absent"; fi
 rm -rf "$BROOT"
+
+# 4b. Attribution matches on a path SEPARATOR, not a bare suffix. Without the
+# anchor a dirty "foo.js" counts as accounted for by an edit to
+# "/elsewhere/barfoo.js", and it silently drops off the unattributed list.
+# pwd -P: on macOS /var is a symlink to /private/var and git rev-parse resolves
+# it, so an unresolved path here would never equal what openloops reports.
+OROOT="$(mktemp -d "$TMP/lastcall-suffix.XXXXXX")"
+OROOT="$(cd "$OROOT" && pwd -P)"
+( cd "$OROOT" && git init -q . && mkdir -p sub \
+  && printf 'x\n' > foo.js && printf 'x\n' > sub/barfoo.js \
+  && git add -A && git commit -qm seed && printf 'y\n' >> foo.js ) >/dev/null 2>&1
+sfx="$(jq -cn --arg c "$OROOT" '{session: {id: "fixture-suffix", cwd: $c, branch: "main",
+      started: "2026-01-01T00:00:00Z", ended: "2026-01-01T00:00:01Z",
+      wall_s: 1, active_s: 1},
+    tokens: [], agents: [],
+    work: {tools: {Edit: 1}, files: {($c + "/sub/barfoo.js"): 1},
+           files_coverage: {edit_tool_calls: 1, bash_calls: 0, attributed: true}},
+    friction: {tool_errors: 0, interrupts: 0, denials: 0}, evidence: []}' \
+  | "$S/openloops.sh" 2>/dev/null)"
+if printf '%s' "$sfx" | jq -e --arg c "$OROOT" \
+     '.uncommitted_unattributed == [$c + "/foo.js"]' >/dev/null 2>&1
+then ok; else bad "openloops matched an unattributed file on a bare suffix"; fi
+rm -rf "$OROOT"
 
 # The capture script itself, independent of any session. It sits in the status
 # line of whoever opts in, so the contract is that it cannot break one: stdin

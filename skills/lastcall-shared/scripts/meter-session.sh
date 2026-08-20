@@ -81,8 +81,12 @@ if [ -f "$CAPFILE" ]; then
   # The filename is the session id, but the payload is checked against it too:
   # a store copied between machines, or a mangled write, must not be attributed
   # to the session being metered.
-  CAP="$(jq -c --arg sid "$SID" \
-        'select(.schema == "lastcall.statusline/1" and .payload.session_id == $sid)' \
+  # -s, and `first`, because jq exits 0 while emitting N documents: a file that
+  # somehow holds two captures would otherwise hand --argjson two JSON values
+  # and abort the meter. Slurping collapses that to one or to nothing.
+  CAP="$(jq -c -s --arg sid "$SID" \
+        'map(select(.schema == "lastcall.statusline/1"
+                    and .payload.session_id == $sid)) | first // empty' \
         "$CAPFILE" 2>/dev/null)" || CAP=null
   [ -n "$CAP" ] || CAP=null
 fi
@@ -236,7 +240,16 @@ meter_file() {
                     then with_entries(select(.value != null and .value != {}))
                     else . end);
 
-    { session: {
+    # A lane with no timestamped entries at all yields a null first_ts, and jq
+    # sorts null BELOW every number, so `min` over it returns null and
+    # todateiso8601 then aborts the whole meter. That became reachable when
+    # MAINS started collecting every matching file: one empty stub left under a
+    # stale slug by a rename is enough. Filter before reducing, and treat "no
+    # timestamps anywhere" as unmeasured rather than as epoch zero.
+    ( map(.first_ts | select(. != null)) | min ) as $t0
+    | ( map(.last_ts | select(. != null)) | max ) as $t1
+
+    | { session: {
         id: $sid,
         # The LATEST main lane wins, not the first. A split session carries the
         # pre-rename path in its earlier part, and reporting that as the session
@@ -245,9 +258,9 @@ meter_file() {
                  // (map(.cwd    | select(.)) | first)),
         branch: ((map(select(.lane == "main" and .branch != null)) | max_by(.last_ts) | .branch)
                  // (map(.branch | select(.)) | first)),
-        started: (map(.first_ts) | min | todateiso8601),
-        ended:   (map(.last_ts) | max | todateiso8601),
-        wall_s:  ((map(.last_ts) | max) - (map(.first_ts) | min)),
+        started: ($t0 | if . == null then null else todateiso8601 end),
+        ended:   ($t1 | if . == null then null else todateiso8601 end),
+        wall_s:  (if $t0 == null or $t1 == null then 0 else $t1 - $t0 end),
         # Main-thread active time only: subagents run concurrently, so adding
         # their spans would double-count the same minutes.
         # Summed across main lanes. A split session loses only the gap that
@@ -341,17 +354,21 @@ meter_file() {
               # Subscriber-only, and only after the first API response. For a
               # Max plan this is the constraint that actually binds, which no
               # dollar figure expresses. resets_at arrives as epoch seconds.
+              # Guarded on TYPE, not just on null. These fields are undocumented
+              # external input: a resets_at that arrives as an ISO string rather
+              # than epoch seconds would abort the entire meter at
+              # todateiso8601, taking token and time counts down with it over a
+              # field nothing depends on. A value of the wrong type is
+              # unmeasured, which is the same outcome as absent.
               rate_limits: ( $p.rate_limits
-                | { five_hour: { used_percentage: .five_hour.used_percentage,
-                                 resets_at:       .five_hour.resets_at,
-                                 resets_at_utc:   (.five_hour.resets_at
-                                                   | if . == null then null
-                                                     else todateiso8601 end) },
-                    seven_day: { used_percentage: .seven_day.used_percentage,
-                                 resets_at:       .seven_day.resets_at,
-                                 resets_at_utc:   (.seven_day.resets_at
-                                                   | if . == null then null
-                                                     else todateiso8601 end) } } ),
+                | (def num: if type == "number" then . else null end;
+                   def utc: if type == "number" then todateiso8601 else null end;
+                   { five_hour: { used_percentage: (.five_hour.used_percentage | num),
+                                  resets_at:       (.five_hour.resets_at | num),
+                                  resets_at_utc:   (.five_hour.resets_at | utc) },
+                     seven_day: { used_percentage: (.seven_day.used_percentage | num),
+                                  resets_at:       (.seven_day.resets_at | num),
+                                  resets_at_utc:   (.seven_day.resets_at | utc) } }) ),
 
               # agent_s minus API wait is time spent RUNNING TOOLS — the
               # difference between a slow model and a slow test suite, which no
