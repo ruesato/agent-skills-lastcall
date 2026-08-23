@@ -187,7 +187,20 @@ configures it — see the README for why.
 Each of these silently corrupts totals if a reimplementation drops it:
 
 1. **Deduped by `requestId`.** Streaming writes one entry per chunk sharing a
-   `requestId`. Summing raw entries overcounts by roughly 90%.
+   `requestId`, and every chunk in a group repeats the same cumulative `usage`,
+   so the group collapses to its first entry. Summing raw entries overcounts by
+   roughly 90%. **This guard is load-bearing, not vestigial.** Measured
+   2026-08-22 over 27 local transcripts: `requestId` present on 5629 of 5630
+   assistant entries, ~50% of entries duplicates, and the most common group size
+   is *three*, not two. A 2026-08-22 external review sampled this as absent from
+   100% of turns, concluded the guard was inert, and proposed changing the
+   grouping key; on this corpus that would have inflated every total by ~2.3x.
+   So the meter now MEASURES what the key did rather than assuming it, and
+   reports it as `session.dedup` — `entries`, `turns`, `collapsed`, and
+   `rid_coverage`. A `rid_coverage` of 0 means the fallback to `uuid` carried
+   the whole file and nothing was collapsed; `cost.sh` raises a caveat, because
+   that is the signal the transcript format moved. Do not delete the guard on
+   the strength of a session that happens to need no collapsing.
 2. **Subagents included.** Their turns live in
    `<project>/<session-id>/subagents/*.jsonl`, not in the main transcript.
    Metering only the main file silently omits all subagent cost.
@@ -234,17 +247,36 @@ Each of these silently corrupts totals if a reimplementation drops it:
 
 ## 2. Evidence drop-box
 
-**This is the Fathom seam.** Any skill that completes real work contributes here.
-`lastcall` globs the directory — it holds no per-skill integration code, so new
-producers need no changes on the consumer side.
+**Any skill or script that completes real work contributes here.** `lastcall`
+globs the directory — it holds no per-skill integration code, so new producers
+need no changes on the consumer side.
+
+Earlier revisions called this "the Fathom seam" and named Fathom as the
+producer. That was a guess, and it pointed integrators at the wrong plugin: for
+beads-backed users `fathom-shared/memory.md:63` writes no per-task file at all,
+so a Fathom-side emitter would have to read beads anyway. The seam is real; the
+named producer was not. See `emit-evidence-beads.sh`.
 
 ### Location
 
 ```
-<project-transcripts>/<session-id>/evidence/<source>-<timestamp>.json
+${LASTCALL_EVIDENCE_DIR:-~/.claude/lastcall/evidence}/<session-id>/<source>-<timestamp>.json
 ```
 
 One file per emitting run. Never modify or overwrite another producer's file.
+
+Keyed on the **session id alone** — no cwd, no project slug. This mirrors the
+statusline store, and it is deliberate rather than incidental: a slug-keyed path
+loses evidence silently in two ordinary situations. A session that outlives a
+directory rename splits across two project directories under one id, so reading
+one drops the other. And `claude --worktree` sets cwd to
+`.claude/worktrees/<name>`, which slugs to a different project directory than
+the repository root, so a worktree session and its evidence can never meet.
+
+The drop-box also lives under a directory `lastcall` owns rather than inside the
+Claude Code transcript tree. That tree is managed and rotated by the harness —
+measured 2026-08-22, five of eight ledger rows already had no transcript left on
+disk — and nothing guarantees a third-party producer's files survive there.
 
 ### Shape
 

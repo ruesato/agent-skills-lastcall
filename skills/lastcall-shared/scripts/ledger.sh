@@ -19,16 +19,29 @@ while [ -L "$SELF" ]; do
 done
 HERE="$(cd "$(dirname "$SELF")" && pwd)"
 LEDGER="${LASTCALL_LEDGER:-$HOME/.claude/lastcall/ledger.jsonl}"
-PROJECTS="${CLAUDE_PROJECTS:-$HOME/.claude/projects}"
+# The evidence drop-box. Mirrors the statusline store (meter-session.sh:78),
+# including the env override, so both of lastcall own stores live under a
+# directory lastcall controls rather than inside the harness transcript tree.
+EVIDENCE="${LASTCALL_EVIDENCE_DIR:-$HOME/.claude/lastcall/evidence}"
 COST="$HERE/cost.sh"
 
-slug() { printf '%s' "$1" | sed 's|[^a-zA-Z0-9-]|-|g'; }
 
 # Evidence for a session, reduced to counts. Absent evidence is reported as
 # absent, never as zero completed tasks — see contracts.md section 3.
+#
+# Keyed on the session id ALONE. It used to resolve $PROJECTS/<cwd-slug>/$sid,
+# which broke in two ways that both lose evidence silently. A session outliving
+# a directory rename splits across two project dirs under one id, so picking one
+# drops the other (the same hazard meter-session.sh:46-56 documents, measured
+# there at 822 lines counted and 63 ignored). And `claude --worktree` sets cwd
+# to .claude/worktrees/<name>, which slugs to a different project dir than the
+# repo root, so a worktree session and its evidence could never find each other
+# — the normal path for a worktree-per-branch workflow, not an edge case.
+# Storing under a directory lastcall owns removes both, and stops the drop-box
+# squatting in a tree the harness manages and rotates.
 evidence_for() {
-  local sid="$1" cwd="$2" dir
-  dir="$PROJECTS/$(slug "$cwd")/$sid/evidence"
+  local sid="$1" dir
+  dir="$EVIDENCE/$sid"
   if [ ! -d "$dir" ]; then printf '%s' 'null'; return; fi
 
   local files=("$dir"/*.json)
@@ -60,15 +73,14 @@ evidence_for() {
 }
 
 cmd_append() {
-  local meter cost sid cwd ev row commits
+  local meter cost sid ev row commits
   # Commits created by lastcall's delegation, if any. Passed in rather than
   # derived: only the caller knows which commits belong to this session.
   commits="$(printf '%s\n' "$@" | jq -Rs 'split("\n") | map(select(length > 0))')"
   meter="$(cat)"
   cost="$(printf '%s' "$meter" | "$COST")"
   sid="$(printf '%s' "$meter" | jq -r '.session.id')"
-  cwd="$(printf '%s' "$meter" | jq -r '.session.cwd')"
-  ev="$(evidence_for "$sid" "$cwd")"
+  ev="$(evidence_for "$sid")"
 
   row=$(jq -cn --argjson m "$meter" --argjson c "$cost" --argjson e "$ev" \
               --argjson commits "$commits" '

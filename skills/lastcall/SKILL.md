@@ -146,8 +146,11 @@ does); report nothing. When `diverged` is true the divergence is already in
 printf '%s' "$M" | "$OPENLOOPS"
 ```
 
-Evidence arrives through the drop-box at `<session>/evidence/*.json` — other
-skills write there, and the meter folds it into `.evidence`. Glob it, skip
+Evidence arrives through the drop-box at
+`~/.claude/lastcall/evidence/<session-id>/*.json` (override with
+`LASTCALL_EVIDENCE_DIR`) — producers write there, and `ledger.sh` folds it into
+`.evidence`. It is keyed on the session id alone, so a directory rename or a
+`--worktree` session still finds its own evidence. Glob it, skip
 unparseable files with a warning rather than aborting, and dedupe on
 `(source, task.id)` keeping the highest `emitted_at`. Full shape in
 `../lastcall-shared/references/contracts.md` section 2.

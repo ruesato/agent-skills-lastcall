@@ -110,14 +110,27 @@ agents_json() {
 # from the typo. Write "the row", never "the row" with a possessive s.
 meter_file() {
   jq -s --arg lane "$2" --argjson gap "$IDLE_GAP_S" '
-    # Streaming emits one entry per chunk sharing a requestId. Collapsing each
-    # group to its first entry is what stops totals from roughly doubling.
+    # Streaming emits one entry per chunk sharing a requestId, and every chunk
+    # in a group carries the SAME cumulative usage. Collapsing each group to its
+    # first entry is what stops totals from inflating by the group size.
     # <synthetic> entries have a null requestId and all-zero usage; drop them.
     ( map(select(.type == "assistant"
                  and .message.model != "<synthetic>"
                  and .message.usage != null))
-      | group_by(.requestId // .uuid) | map(.[0])
-    ) as $turns
+    ) as $entries
+    | ( $entries | group_by(.requestId // .uuid) | map(.[0]) ) as $turns
+
+    # This guard is load-bearing, and its coverage is MEASURED rather than
+    # assumed. Measured 2026-08-22 over 27 local transcripts: requestId present
+    # on 5629 of 5630 assistant entries, and the most common group size is
+    # THREE, not two. A review that sampled this wrongly concluded the guard was
+    # inert and proposed changing the key; doing so would have inflated every
+    # total here by ~2.3x. So report what the key actually did: rid_coverage 0
+    # means every entry fell through to uuid, which is the signal the transcript
+    # format moved, not proof that nothing needed collapsing.
+    | ( { entries: ($entries | length),
+          turns:   ($turns   | length),
+          rid:     ($entries | map(select(.requestId != null)) | length) } ) as $dedup
 
     # Timestamps carry milliseconds, which fromdateiso8601 rejects.
     | ( map(.timestamp | select(. != null)
@@ -157,6 +170,7 @@ meter_file() {
         # evidence that work landed. summary.md points at it for the Headline;
         # this is what makes that instruction real.
         ai_title: (map(select(.type == "ai-title") | .aiTitle // empty) | last),
+        dedup: $dedup,
         first_ts: ($ts | first), last_ts: ($ts | last), active_s: $active,
         agent_s:     (($td | map(.durationMs) | add // 0) / 1000),
         agent_turns: ($td | length),
@@ -291,7 +305,18 @@ meter_file() {
         agent_turns: (map(select(.lane=="main") | .agent_turns) | add // 0),
         # null when the session never got a title, which is unmeasured rather
         # than untitled. Latest wins: a split session carries the earlier one.
-        ai_title: (map(select(.lane=="main") | .ai_title | select(.)) | last)
+        ai_title: (map(select(.lane=="main") | .ai_title | select(.)) | last),
+        # What the streaming dedup actually did, summed over every lane and
+        # every split part. collapsed is how many duplicate chunks were removed;
+        # rid_coverage is the share of entries that carried the key it groups
+        # on. Downstream turns rid_coverage == 0 into a caveat: it means the
+        # grouping silently fell through to uuid for the whole file.
+        dedup: ( (map(.dedup) | { entries: (map(.entries) | add // 0),
+                                  turns:   (map(.turns)   | add // 0),
+                                  rid:     (map(.rid)     | add // 0) })
+                 | . + { collapsed: (.entries - .turns),
+                         rid_coverage: (if .entries == 0 then null
+                                        else ((.rid / .entries * 1000 | round) / 1000) end) } )
       },
       # Grouped by (model, lane, speed, service_tier). The last two are pricing
       # dimensions; the lane split is there because main threads and subagents

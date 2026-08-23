@@ -118,6 +118,18 @@ jq -s --slurpfile r "$RATES" --argjson drift "$DRIFT_PCT" '
           | if . > 0 then
               ["\(.) web search calls carry per-request spend that no token bucket expresses — NOT in this total"]
             else [] end )
+      # The streaming dedup groups on requestId and falls back to uuid, which
+      # is unique per entry. Coverage of 0 means the fallback carried the whole
+      # file, so nothing was ever collapsed -- either the transcript genuinely
+      # has one entry per turn, or the field was renamed and totals are now
+      # inflated by the duplicate chunks. This cannot tell which, so it says so
+      # rather than trusting the number. Explicit null test, not //: coverage
+      # of 0 is exactly the value being looked for and // would discard it.
+      + ( ($m.session.dedup // null) as $d
+          | if $d == null or $d.rid_coverage == null then []
+            elif $d.rid_coverage == 0 then
+              ["no assistant entry in this transcript carries requestId, so the streaming dedup fell through to uuid for all \($d.entries) of them and collapsed nothing -- if the field was renamed rather than absent, this total is inflated by the duplicate chunks"]
+            else [] end )
       # Divergence names both numbers and points at the rate table. It never
       # says which one is right, because this cannot know.
       + ( if ($xcheck.diverged // false) then
