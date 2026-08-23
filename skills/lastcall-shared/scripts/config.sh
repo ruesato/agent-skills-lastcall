@@ -6,6 +6,7 @@
 #   config.sh get <key>            # one resolved value, bare (true/false)
 #   config.sh set <key> <value>    # record a pref for this repo
 #   config.sh init                 # stamp this repo as set up, on this version
+#   config.sh drift                # has setup gained options since? read-only
 #   config.sh forget               # drop this repo entry; other repos untouched
 #   config.sh path                 # where the config lives
 #
@@ -51,6 +52,27 @@ BUILTINS='{
   "report":      false,
   "file_issues": false
 }'
+
+# When each slot in that vocabulary first became a question setup could ask.
+# `drift` reads this to answer "does this config predate something the setup
+# screen would ask today" without re-running setup at the user to find out.
+#
+# A row means: a config stamped OLDER than `version` predates these slots.
+#
+# SEEDED FROM WHAT ACTUALLY SHIPPED, and it has to stay that way. No release
+# before the one below had a config store at all, so all four slots arrive
+# together and every config in existence today reports NO drift. That is the
+# honest answer, not a missing feature — the table is here for the NEXT slot,
+# and adding a row is the whole cost of wiring one into the upgrade offer.
+#
+# The version below is the earliest a config can claim, not a guess at the
+# release this lands in: entries written by this code stamp whatever
+# plugin.json says, so keying the slots to that same value is what makes a
+# config written today read as current rather than as instantly drifted.
+SLOT_HISTORY='[
+  { "version": "0.3.1",
+    "slots": ["memories", "ledger", "report", "file_issues"] }
+]'
 
 # ------------------------------------------------------------------ repo key
 #
@@ -101,12 +123,20 @@ lastcall_version() {
 # running; `claude` on PATH may be a wrapper shim pointing somewhere else
 # (measured on this machine, it is). Neither is a documented contract, so both
 # are read defensively.
-cc_version() {
+# The free half, split out because `drift` runs on every close and must not
+# spawn a process to fill in a field that never changes its answer.
+cc_version_fast() {
   local p="${CLAUDE_CODE_EXECPATH:-}" v
   v="$(basename "$p" 2>/dev/null || true)"
   case "$v" in
-    [0-9]*.[0-9]*.[0-9]*) printf '%s' "$v"; return 0 ;;
+    [0-9]*.[0-9]*.[0-9]*) printf '%s' "$v" ;;
   esac
+}
+
+cc_version() {
+  local v
+  v="$(cc_version_fast)"
+  if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
   command -v claude >/dev/null 2>&1 || return 0
   v="$(claude --version 2>/dev/null | awk 'NR==1{print $1}')" || return 0
   case "$v" in
@@ -121,8 +151,14 @@ cc_version() {
 # things to tell a user.
 CFG='null'
 STATE='absent'
+# The schema string the file actually carries, kept even when it does not match.
+# STATE collapses every unreadable config to one value, but telling an OLDER
+# schema from a NEWER one is the difference between something that might be
+# migrated and something that must not be touched, so the raw string survives.
+SEEN_SCHEMA=''
 
 load() {
+  SEEN_SCHEMA=''
   [ -f "$CONFIG" ] || { CFG='null'; STATE='absent'; return 0; }
 
   local parsed
@@ -136,6 +172,7 @@ load() {
   fi
 
   local s; s="$(printf '%s' "$parsed" | jq -r '.schema // ""')"
+  SEEN_SCHEMA="$s"
   if [ "$s" != "$SCHEMA" ]; then
     echo "config: $CONFIG carries schema \"$s\", expected $SCHEMA — treating as absent" >&2
     CFG='null'; STATE='unreadable'; return 0
@@ -191,7 +228,9 @@ resolve() {
         project: {
           # The first-run screen turns on THIS, not on any pref value: a pref
           # can equal its built-in and still never have been answered.
-          configured:       ($p != null),
+          configured:       (if $p == null then false
+                             elif $p.setup_ran == null then false
+                             else $p.setup_ran end),
           configured_at:    $p.configured_at,
           lastcall_version: $p.lastcall_version,
           cc_version:       $p.cc_version
@@ -283,6 +322,12 @@ upsert_entry() {
       then .projects += [ { origin:           ($origin | blank),
                             repo_root:        $root,
                             configured_at:    $now,
+                            # setup_ran distinguishes "the setup screen ran" from
+                            # "an entry exists". A bare `set` creates an entry
+                            # without the user ever having seen setup, and
+                            # treating that as configured would skip first run
+                            # forever. Only `init` asserts it.
+                            setup_ran:        $restamp,
                             # A brand new entry is always stamped: whatever
                             # wrote it was running this version.
                             lastcall_version: ($lv | blank),
@@ -296,6 +341,7 @@ upsert_entry() {
                               | .prefs = ((.prefs // {}) + $patch)
                               | if $restamp
                                 then .configured_at    = $now
+                                   | .setup_ran        = true
                                    | .lastcall_version = ($lv | blank)
                                    | .cc_version       = ($cv | blank)
                                 else . end )
@@ -386,6 +432,164 @@ cmd_init() {
   upsert_entry '{}' true
 }
 
+# Does this project config predate something setup would ask today?
+#
+# READ-ONLY, and that is the entire point. It reports; it never re-runs setup,
+# never writes, never applies a new default. An upgrade must not change
+# behaviour under a user who never asked for it, so the upgrade path can only
+# ever be an OFFER, and this is what decides whether that offer is honest.
+#
+# `self_heal` is deliberately not called here even though every other read
+# calls it: it writes, and a repaired repo_root is not worth making a read into
+# a write. `get` already heals; a close that runs `drift` will have run `get`.
+#
+# TWO KINDS OF DRIFT, and they are not symmetric:
+#   version — the stamp predates a release that ADDED a slot. Offerable.
+#   schema  — the stored shape is not this one. An older shape might one day be
+#             migrated; a NEWER one was written by software this code does not
+#             understand, and the only safe answer is unknown. Writes already
+#             refuse on an unknown schema and drift must not become a way round
+#             that, so it recommends nothing there.
+#
+# ENVIRONMENT DRIFT IS NOT MEASURED HERE. A tracker that was unreachable at
+# setup and is now reachable shows up in the session tool list, which the model
+# already has for nothing; `claude mcp list` costs ~3.9s and must not run on
+# every close.
+cmd_drift() {
+  load
+  local lv cv
+  lv="$(lastcall_version)"
+  cv="$(cc_version_fast)"
+
+  jq -n --argjson cfg "$CFG" --argjson hist "$SLOT_HISTORY" --argjson b "$BUILTINS" \
+        --arg state "$STATE" --arg seen "$SEEN_SCHEMA" --arg schema "$SCHEMA" \
+        --arg lv "$lv" --arg cv "$cv" \
+        --arg origin "$ORIGIN" --arg root "$ROOT" --arg path "$CONFIG" '
+    # WARNING: no apostrophes anywhere in this program, comments included. It is
+    # a single-quoted shell string and one apostrophe ends it early, with the
+    # error landing far from the typo. Write "the row", never the possessive.
+    def blank: if . == "" then null else . end;
+
+    # Numeric compare, never string compare: "0.10.0" sorts BEFORE "0.9.0" as
+    # text and after it as a version. A pre-release suffix is dropped, so
+    # 0.4.0-rc1 counts as 0.4.0 — which errs toward NOT offering, the safe
+    # direction for something that only ever produces an offer.
+    def vparse: (. // "") | tostring | split("-") | .[0] | split(".")
+                | map(tonumber? // 0) | (. + [0, 0, 0]) | .[0:3];
+    # A version that cannot be read is UNMEASURED, never old. Treating it as old
+    # would put an upgrade prompt in front of someone on nothing at all.
+    def vknown: (. // "") | tostring | test("^[0-9]+\\.[0-9]+");
+
+    # "lastcall.config/1" splits into a family and an integer, which is what
+    # lets an older schema be told from a newer one. Anything not shaped like
+    # that is unrecognized, and unrecognized is never upgradable.
+    def sfam: (. // "") | split("/") | (.[0] // null);
+    def snum: (. // "") | split("/") | (.[1] // "") | (tonumber? // null);
+
+    ($seen | sfam) as $sf | ($seen | snum) as $sn
+    | ($schema | sfam) as $cf | ($schema | snum) as $cn
+    | (if   $seen == ""      then null
+       elif $seen == $schema then "same"
+       elif $sf == $cf and $sn != null and $cn != null
+       then (if $sn > $cn then "newer" else "older" end)
+       else "unrecognized" end) as $rel
+
+    # Same match rule as resolve: origin where there is one, path otherwise.
+    | (($cfg.projects // [])
+       | if $origin != ""
+         then map(select(.origin == $origin))
+         elif $root != ""
+         then map(select(((.origin // "") == "") and .repo_root == $root))
+         else [] end
+       | first) as $p
+
+    | ($p.lastcall_version // "") as $sv
+    | ($b | keys_unsorted) as $known
+
+    # A slot is new to THIS config when the stamp predates the release that
+    # introduced it. Two filters keep the offer honest: a slot that has since
+    # left the vocabulary is not offered, and neither is one the user has
+    # already answered with `set`, because the stamp only moves on `init` and an
+    # answered slot would otherwise resurface forever. `has`, not `//` — a
+    # stored false is a real answer, and `false // x` is x.
+    | ([ $hist[]
+         | select(($sv | vknown) and (($sv | vparse) < (.version | vparse)))
+         | .slots[]
+         | select(. as $s | $known | index($s))
+         | select(. as $s | ($p.prefs // {}) | has($s) | not) ]
+       | unique) as $new
+
+    | (if   $state == "absent"
+       then { s: "absent", r: "first_run",
+              why: ("no config at " + $path
+                    + "; nothing here has ever been set up, which is a first run and not an upgrade") }
+       elif $rel == "newer" or $rel == "unrecognized"
+       then { s: "unknown", r: "none",
+              why: ("the stored schema is " + $seen + ", not " + $schema
+                    + "; it may have been written by a newer lastcall, so nothing is offered and nothing is rewritten") }
+       # Before the generic unreadable branch: an unknown schema is unreadable
+       # by definition, and the DIRECTION is the whole point. Drifted, but with
+       # nothing to recommend, because a write here would be the overwrite the
+       # write side already refuses.
+       elif $rel == "older"
+       then { s: "drifted", r: "none",
+              why: ("the stored schema " + $seen + " predates " + $schema
+                    + " and this version carries no migration for it, so the file has to be inspected or removed by hand") }
+       elif $state != "ok"
+       then { s: "unknown", r: "none",
+              why: ("the config at " + $path
+                    + " could not be read, so drift is unmeasured rather than absent") }
+       elif $p == null
+       then { s: "absent", r: "first_run",
+              why: "the config holds no entry for this project, so this is a first run here and not an upgrade" }
+       # An entry can exist without setup ever having run: a bare `set` creates
+       # one. That user has not seen the setup screen, so they belong to the
+       # first-run population, not the upgrade one. Explicit null test rather
+       # than `//`, because setup_ran is a boolean and `false // true` is `true`.
+       elif (if $p.setup_ran == null then false else $p.setup_ran end) | not
+       then { s: "absent", r: "first_run",
+              why: "this project has preferences but never went through setup, so it is a first run and not an upgrade" }
+       elif ($sv | vknown | not)
+       then { s: "unknown", r: "none",
+              why: "the entry carries no readable lastcall_version, so what it predates cannot be told" }
+       elif ($lv | vknown | not)
+       then { s: "unknown", r: "none",
+              why: "the running lastcall version could not be read, so there is nothing to compare the stamp against" }
+       elif ($sv | vparse) > ($lv | vparse)
+       then { s: "unknown", r: "none",
+              why: ("the entry was written by lastcall " + $sv + ", which is newer than the " + $lv
+                    + " reading it; nothing is offered") }
+       elif ($new | length) > 0
+       then { s: "drifted", r: "rerun_setup",
+              why: ("setup has gained " + ($new | length | tostring)
+                    + " option(s) since this project was configured on lastcall " + $sv) }
+       else { s: "current", r: "none",
+              why: ("configured on lastcall " + $sv + " and setup has asked nothing new since") }
+       end) as $v
+
+    | { state: $v.s,
+        # An OFFER and never an instruction. rerun_setup is the ONLY value that
+        # means there is anything to put in front of the user at all; first_run
+        # routes to the first-run screen, which is a different population.
+        recommend: $v.r,
+        schema_relation: $rel,
+        path: $path,
+        stored:  { lastcall_version: $p.lastcall_version,
+                   # Recorded, never decisive. A Claude Code upgrade does not
+                   # add lastcall slots, so it cannot produce an offer.
+                   cc_version:       $p.cc_version,
+                   schema:           ($seen | blank),
+                   configured_at:    $p.configured_at },
+        current: { lastcall_version: ($lv | blank),
+                   cc_version:       ($cv | blank),
+                   schema:           $schema },
+        # Only ever populated for version drift, and only with slots that still
+        # exist and that this config has never answered.
+        new_slots: (if $v.r == "rerun_setup" then $new else [] end),
+        reason: $v.why }
+  '
+}
+
 cmd_forget() {
   require_repo; load; guard_writable
   [ "$STATE" = "ok" ] || { echo "config: nothing to forget — no config at $CONFIG" >&2; return 0; }
@@ -401,7 +605,8 @@ case "${1:-}" in
   get)    shift; cmd_get "$@" ;;
   set)    shift; cmd_set "$@" ;;
   init)   shift; cmd_init "$@" ;;
+  drift)  shift; cmd_drift "$@" ;;
   forget) shift; cmd_forget "$@" ;;
   path)   shift; cmd_path "$@" ;;
-  *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

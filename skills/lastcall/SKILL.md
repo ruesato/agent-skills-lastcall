@@ -18,6 +18,8 @@ allowed-tools:
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/emit-evidence-beads.sh:*)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/config.sh *)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/config.sh:*)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/detect.sh *)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/detect.sh:*)
 ---
 
 # lastcall

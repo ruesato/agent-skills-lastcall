@@ -1,6 +1,6 @@
 # Contracts
 
-The four interfaces that must not drift. Everything else in this project is
+The five interfaces that must not drift. Everything else in this project is
 implementation detail and can change freely.
 
 Written first, before any skill, because Fathom is being built in parallel and
@@ -570,3 +570,208 @@ its built-in and still never have been answered.
   temp lives in the config directory rather than `$TMPDIR` — same-filesystem, so
   the rename is atomic, and the write stays inside the one directory. The
   `allowed-tools` grant that lets a skill run this script depends on that.
+
+---
+
+## 5. Environment probe
+
+Produced by `../scripts/detect.sh`. Consumed by the first-run setup screen.
+
+It answers **"what is available here, and can it actually be reached"** — the
+probe half of the routing split. Probe when the question has one right answer;
+prompt when it is a matter of taste. Nothing in this contract decides anything,
+and `detect.sh` writes nothing anywhere.
+
+### Cost, and why it is first-run only
+
+The reachability stage runs `claude mcp list`, measured 2026-08-23 at **3.66s**
+from this repo and **3.81s** from `~/code/pharmgkb-mobile`; end to end, with the
+`gh` round trip, a full `detect.sh` run is **4.99s**. That is a fifth of a whole
+wrap-up spent on a question whose answer changes about once a month, so it must
+not run on every session close. `--cheap` is the per-session path — **0.70s**
+measured in the same place: it keeps every config-derived finding and downgrades
+every reachability to `unknown`.
+
+### Shape
+
+```jsonc
+{
+  "schema": "lastcall.detect/1",
+  "cwd": "/Users/you/code/project",
+
+  "harness": {
+    "claude_code": true,        // is `claude` on PATH at all
+    "cc_version":  "2.1.241",   // null means unmeasured, never "old"
+    "mcp_probe_cmd": "claude mcp list"   // null where no such command exists
+  },
+
+  // PROBE ONLY, NEVER A PROMPT. See the routing rule below.
+  "memory": {
+    "backend": "claude-native",
+    "path":    "~/.claude/projects/<slug>/memory",
+    "state":   "present",       // "present" | "absent"
+    "entries": 12, "has_index": true,
+    "available": true,          // ALWAYS true; absent means never used here
+    "promptable": false
+  },
+
+  "tasks": {
+    "system": "beads",
+    "root":    "/Users/you/code/project",  // null when absent
+    "version": "1.1.0",                    // null means unmeasured
+    "state":   "present",       // "present" | "absent" | "broken"
+    "blocking": false           // true only for "broken"
+  },
+
+  // Reachability-filtered. Only "connected" is eligible to OFFER.
+  "trackers": [
+    { "id": "linear",           // recognised family, see the table below
+      "name": "linear-server",  // the MCP server name, or the forge host
+      "via":  "mcp:linear-server",
+      "target": "https://mcp.linear.app/mcp (HTTP)",
+      "sources": ["project-config", "mcp-runtime"],
+      "state": "needs-auth",    // connected | needs-auth | failed | pending | unknown
+      "detail": "! Needs authentication",
+      "eligible_to_offer": false,
+      "capability": "unverified",
+      "remediation": "run /mcp to connect" }
+  ],
+
+  "forge": {
+    "id": "github",             // github | gitlab | bitbucket | null
+    "host": "github.com",
+    "remote": "git@github.com:you/project.git",
+    "via": "gh",
+    "state": "authenticated"    // authenticated | unauthenticated | absent | unknown
+  },
+
+  "mcp": {
+    "probe": "ran",             // ran | skipped | unavailable | timeout | error | unparsed
+    "reachability": "measured", // "measured" only when probe == "ran"
+    "wall_ms": 3802,            // null when unmeasured
+    "note": null,
+    "servers": [ /* every server seen, tracker or not, with a `tracker` field */ ]
+  },
+
+  "caveats": ["..."]            // human-readable, always present, often empty
+}
+```
+
+### Invariants
+
+Each of these is the difference between a true statement and a confident false
+one, which is the only kind of error a setup screen cannot recover from.
+
+1. **Fail to `unknown`, never to `absent`.** If `claude` is missing, the probe
+   times out, exits non-zero, or prints something the parser does not
+   recognise, every reachability becomes `unknown` and every candidate found in
+   config is still reported. Dropping a configured tracker because a parser
+   broke tells the user they have no tracker — a confident false statement.
+   `unknown` is a true one. Same discipline as invariant 11 on `native`: a
+   missing field means unmeasured, never zero.
+2. **Only `connected` is eligible to offer.** `needs-auth`, `pending`, `failed`
+   and `unknown` are REPORTED, each with a remediation. "Linear is configured
+   but needs authentication; run `/mcp`" is useful, and is the opposite of
+   silently omitting it. `eligible_to_offer` is computed, not stored — a
+   consumer must never derive eligibility from `state` itself.
+3. **Connection is not capability.** A `connected` server has an open
+   transport. It has not been shown to expose any issue-*writing* tool. Every
+   tracker row carries `capability: "unverified"` for that reason, and a
+   consumer must corroborate against its own tool list before offering to file
+   anything.
+4. **The tracker list is a floor whenever `reachability != "measured"`.**
+   Plugin-provided MCP servers appear in neither `~/.claude.json` nor
+   `.mcp.json`, so a config-only pass cannot see them — measured here
+   2026-08-23 as six servers with the probe and one without. A consumer must
+   not read a short list as a census; `caveats` says so explicitly.
+5. **Memory is probed, never prompted.** Claude Code carries its own memory
+   subsystem and it is always available, so `available` is unconditionally
+   true and `state: "absent"` means *never used in this project*. Storing a
+   backend SELECTION would recreate the failure where the selection outlives
+   the backend it named. `bd remember` is deliberately not offered as an
+   alternative: it takes a content string plus a key and cannot carry type,
+   description, or cross-links, so it is a lossy sink for the same data rather
+   than a second backend.
+6. **`tasks.state: "broken"` is a stop-and-tell.** A `.beads` directory with no
+   `bd` on PATH means the issues exist and cannot be read from here. It must
+   never fall back to "no task system": that would drop real tracked work out
+   of the wrap-up with no error anywhere. `blocking` is true only in this case.
+7. **`cc_version` is recorded so a stale parse is diagnosable.** The probe rides
+   undocumented output; when it eventually breaks, the version that broke it is
+   the first thing anyone will want.
+
+### The parse, and why it is written defensively
+
+`claude mcp list` has **no `--json`** — verified 2026-08-23, it answers
+`error: unknown option '--json'`. So this rides human-readable output that is
+not a documented contract, exactly the hazard the project notes for transcripts.
+Three consequences, each verified rather than assumed:
+
+- **It is cwd-sensitive, correctly so.** Run from this repo the Linear line is
+  absent; run from `~/code/pharmgkb-mobile` it is present. A candidate found in
+  config but not listed by the probe is therefore `unknown` with a detail that
+  says so — not `absent`.
+- **It shares its stream with SDK diagnostics**, e.g.
+  `[mcp-sdk] SEP-2352: stored OAuth credential has no issuer stamp`. The parser
+  is line-oriented and skips any line it does not recognise, rather than
+  treating a surprise line as a failure.
+- **Four observable states**, matched on the English status text and not on the
+  glyph. The glyphs are the part most likely to move — a theme, a non-UTF-8
+  terminal, a Windows console — and a status matched on a glyph that changed
+  silently becomes `unknown` for every server at once:
+
+  | Output | `state` |
+  |---|---|
+  | `✔ Connected` | `connected` |
+  | `! Needs authentication` | `needs-auth` |
+  | `✘ Failed to connect — <why>` | `failed` |
+  | `⏸ Pending approval` | `pending` |
+
+Exit status is not a health signal: a run where two servers failed still exits
+0. It distinguishes only "the command ran" from "it did not". An empty result is
+a real measurement in exactly one case, the literal line
+`No MCP servers configured.`; any other unrecognised output is `unparsed`, which
+is `unknown`, not "none".
+
+### Tracker family recognition
+
+`id` comes from a conservative, deliberately short table matched against the
+server name and its url or command together: `linear`, `jira` (also matching
+`atlassian`), `asana`, `notion`, `shortcut`, `clickup`, `trello`, `youtrack`,
+`redmine`, `bugzilla`, `basecamp`, `gitlab`, `github`. `height`, `plane` and
+`monday` are excluded as ordinary English words that would match unrelated urls.
+
+An unrecognised server is not a tracker as far as this script is concerned, but
+it is still emitted under `mcp.servers` with `tracker: null`, so a human or a
+consumer can see it and decide. Recognition is a hint, never an authorisation —
+invariant 3 still applies.
+
+GitHub Issues is the one candidate that does not come from MCP: it is derived
+from the git remote host plus `gh auth status --hostname <host>`, whose exit 0
+is a real authenticated round trip rather than a config reading. It appears as
+`{"id": "github-issues", "via": "gh"}` and is the only tracker that can be
+`connected` without the MCP probe having run.
+
+### Cross-harness
+
+`claude mcp list` exists in Claude Code only. Kiro and Codex — the other two
+environments section 0 targets — have no equivalent, and that is a **documented
+no-op**, not a failure:
+
+```
+mcp.probe        = "unavailable"
+mcp.reachability = "unknown"
+trackers[].state = "unknown"    // candidates still reported, from config alone
+```
+
+It never degrades to `true`. Verified by running with `claude` removed from
+`PATH`: the Linear candidate survives from `.projects[<cwd>].mcpServers` with
+`state: "unknown"` and `eligible_to_offer: false`.
+
+### Overrides
+
+| Variable | Effect |
+|---|---|
+| `CLAUDE_PROJECTS` | Root for the memory probe. Same override the meter uses. |
+| `LASTCALL_CLAUDE_JSON` | Path to the user-level Claude Code config. Read-only. |
+| `LASTCALL_MCP_TIMEOUT_S` | Bound on the probe, default 20. Exceeding it is `unknown`, not an error. |
