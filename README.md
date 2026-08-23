@@ -20,6 +20,17 @@ As a plugin, from the `ruesato-plugins` marketplace:
 /plugin install lastcall
 ```
 
+If that `add` fails with `Permission denied (publickey)` — some Claude Code
+versions clone `owner/repo` shorthand over SSH, which fails on a machine with
+no GitHub SSH key — add the marketplace by its full HTTPS URL instead:
+
+```
+/plugin marketplace add https://github.com/ruesato/plugins.git
+```
+
+Setting `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` fixes the shorthand the same way,
+for every marketplace and plugin on that machine.
+
 Or link this repo directly, which is the better option if you intend to edit
 the skills — it symlinks rather than copies, so edits apply live:
 
