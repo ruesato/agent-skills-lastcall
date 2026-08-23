@@ -119,9 +119,8 @@ defaulted outright; the report and the tracker leave this machine, so they
 are confirmed every single time regardless of what is configured; the commit
 gate takes no configuration at all.
 
-If nothing implements the setup flow in this installation yet, `--reset-setup`
-has nothing to reset. Say so plainly and continue with the built-ins rather than
-inventing a configuration screen.
+`--reset-setup` routes to section 0b. Where this project has no recorded
+answers, there is nothing to reset — say so plainly and offer setup instead.
 
 ### Ambiguity stops — it does not guess
 
@@ -137,11 +136,100 @@ it answered; never guess, and never treat an ambiguous or negative reply as
 approval"* — in its case, approval to file. The second clause is the one that
 binds here. An ambiguous reply is not approval.
 
+## 0b. Setup — first run, and re-run
+
+Two scripts answer everything this section needs, and both are cheap enough to
+run before metering:
+
+```bash
+"$DETECT" --cheap        # what is available here
+"$CONFIG" drift          # has this project answered, and is the answer stale
+```
+
+`drift` returns a `recommend` field, and it is the whole routing decision:
+
+| `recommend` | Meaning | What you do |
+|---|---|---|
+| `first_run` | This project has no recorded answers | Offer the screen below, once |
+| `rerun_setup` | Answers exist but predate options that now exist | One line in the closing summary. Not a screen |
+| `none` | Answers exist and are current | Nothing. Say nothing |
+
+`first_run` and `rerun_setup` are different populations, and treating them alike
+is the mistake to avoid: someone who has never seen setup should not be shown an
+upgrade notice, and someone mid-project should not be re-interrogated because a
+release added a question.
+
+### The first-run screen
+
+**Lead with what was found, not with a question.** The detection is the useful
+part; the question is a formality on top of it.
+
+> Setting up lastcall for `<project>` — one time.
+> Detected: memories → Claude Code's own memory system · tasks → beads · tracker → GitHub Issues.
+> Also present but not reachable: Linear (needs authentication) — run `/mcp` and I will pick it up next time.
+
+Then **one** `AskUserQuestion`, `multiSelect`, pre-ticked to the built-ins:
+
+- ☑ **Save memories** — what this project taught you, so a later session starts informed. Each one is named in the closing summary.
+- ☑ **Keep the ledger row** — the measurement this run produced. Without it, a cost figure has nothing to be compared against.
+- ☐ **Publish a report** — a shareable artifact. Off unless asked; `--publish-report` opts in per run.
+- ☐ **File open loops to the tracker** — the titles are always shown and confirmed before anything is filed.
+
+A second question, *which tracker owns this project*, appears **only when two or
+more trackers came back eligible**. One or none is not a question. Today, in most
+projects, that means first run is a single screen.
+
+### What the screen must not do
+
+- **It must not ask which memory system to use.** That is resolved by looking,
+  not by asking. `detect.sh` reports it; the alternatives cannot carry the same
+  record — no type, no description, no links between entries — so offering the
+  choice would be offering a worse answer as though it were equal.
+- **It must not offer a tracker that came back anything other than `connected`.**
+  Report those with their remediation. An offer implies it will work.
+- **It must not treat a short tracker list as proof of absence** when
+  reachability was not measured. `detect.sh` says so in `caveats` when that is
+  the case; pass it through rather than reading silence as "none here".
+
+### Dismissal
+
+Escaping the screen records nothing. The run continues on the built-ins, which
+is the same behaviour as a machine that never had setup at all — so a dismissal
+costs the user nothing and commits them to nothing.
+
+Offer it once more on the next close. If it is dismissed a second time, record
+*that* and stop offering. Repeatedly asking someone who has twice declined is
+how a helpful prompt becomes a nuisance, and the answer is still recoverable
+with `--reset-setup` whenever they want it.
+
+**A dismissal is not an answer.** Never read it as agreement to the pre-ticked
+boxes, and never read it as rejection of the skill.
+
+### Re-running it
+
+Three ways back in, deliberately unequal in how loud they are:
+
+1. **The user asks** — `--reset-setup`, or "redo lastcall setup". Drops this
+   project's answers and runs the screen again. Always available.
+2. **Options have been added since** — `drift` returns `rerun_setup` and names
+   them. Surface **one line** in the closing summary, e.g. *"setup has new
+   options since this project was configured (filing issues). Say 'redo lastcall
+   setup' to review."* An offer, not a flow, and never an automatic change: an
+   upgrade must not alter behaviour for someone who did not ask for it.
+3. **Something unreachable became reachable** — the common case is a tracker
+   that needed authentication at setup and now has it. You can see the tools
+   available to you in this session at no cost, so notice it that way rather
+   than re-probing on every close. Mention it once, the same single line.
+
+In all three, what a project has already answered stays answered until the user
+chooses otherwise. A new option arrives unticked, not applied.
+
 ## 1. Meter
 
-Resolve `$METER`, `$COST`, `$OPENLOOPS`, `$LEDGER_SH`, `$DOCTRINE`, and
-`$EMIT_BEADS` (`emit-evidence-beads.sh`, used in step 7) to the first location
-that exists:
+Resolve `$METER`, `$COST`, `$OPENLOOPS`, `$LEDGER_SH`, `$DOCTRINE`,
+`$EMIT_BEADS` (`emit-evidence-beads.sh`, used in step 7), `$CONFIG`
+(`config.sh`) and `$DETECT` (`detect.sh`, both used in section 0b) to the first
+location that exists:
 
 1. `${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/<script>` — substituted in
    Claude Code, and matches the `allowed-tools` grants above, so it runs without

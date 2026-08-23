@@ -151,6 +151,7 @@ skill takes:
 | RA2 Session Persistence | "the ledger row, the evidence drop-box"; separately a span starting "create anything." |
 | EA2 Autonomous Decision Making | "without asking" |
 | P4 Behavior Manipulation | "never tell them" |
+| RA2 again | the bare verb **"Write"** in "Write the ledger row" — "Keep the ledger row" and "Ledger row" both score 0 |
 
 AS1 is narrower than it first looked: `SKILL.md` carries a literal
 `~/.claude/lastcall/...` path today and still scores 0, so it is the *agent
@@ -158,9 +159,11 @@ config* file specifically that trips it, not any path under `~/.claude`. Naming
 `permissions.allow` as the mechanism carried the same information safely.
 
 **Diagnosing a hit cheaply:** `REPORT_DIR=<dir> ./bin/scan-skills.sh <skill>`
-then `jq '.issues' <dir>/<skill>.json` prints the exact matched string. That
-turns a vague MEDIUM into a one-line fix and is much faster than bisecting the
-edit.
+then `jq -r '.issues[0].finding' <dir>/<skill>.json` prints the matched span —
+`.finding` is the field that carries it; `.evidence` and `.snippet` are null.
+`.location.start_line` gives the line. That narrows it to a paragraph; to narrow
+it to a WORD, loop a one-word substitution over a scratch copy and re-scan,
+which is how "Write" was isolated above. Both are far faster than bisecting.
 
 Also note the local/CI version split: the installed scanner is v2.9.6 while
 `.github/workflows/skillspector.yml` pins v2.9.5 and `.skillspector-baseline.yaml`
