@@ -172,6 +172,29 @@ the `tally` RA2 fingerprint while CI stays green. **Do not re-baseline to the
 local version** — that would invert the problem and break CI. Scan locally to
 confirm your own skill is clean, and read a `tally`-only failure as drift.
 
+The version mismatch alone defeats suppression, so the local scanner cannot
+tell you anything about the baseline: verified 2026-08-23, v2.9.6 resurfaces the
+`tally` RA2 finding even on **unmodified** `HEAD` content. That matters when you
+edit `skills/tally/SKILL.md` for any reason, because the per-file binding then
+invalidates the fingerprint for CI too, and you cannot regenerate it or even
+confirm the breakage with the local binary.
+
+The fix is to run the pinned SHA without disturbing the installed one:
+
+```bash
+export UV_TOOL_DIR=<scratch>/uvtools UV_TOOL_BIN_DIR=<scratch>/uvbin
+uv tool install git+https://github.com/NVIDIA/skillspector.git@27fd9620dbfed1a2f405fd8c519661e51511f06e
+"$UV_TOOL_BIN_DIR/skillspector" baseline skills/tally --no-llm -o <scratch>/new.yaml
+```
+
+Take only the `hash:` from the generated file — it ships a placeholder reason,
+and the reviewed prose in `.skillspector-baseline.yaml` is the part worth
+keeping. Re-review at the source location first and append what you checked to
+the existing `reason`; the entry records every re-review for exactly this
+reason. Then confirm with `PATH=<scratch>/uvbin:$PATH ./bin/scan-skills.sh`,
+which is the gate as CI runs it, and `uv tool uninstall skillspector` with the
+same two env vars set.
+
 Useful property when editing `lastcall`: it has **no** baseline fingerprint of
 its own and scores 0, so it has no cushion — any finding on it is unambiguously
 from the edit in hand.

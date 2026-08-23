@@ -126,6 +126,52 @@ moments the user actively stopped you.
 From `cost.sh`. Report `total_usd`, and `promo_applied` when true, since a
 promotional rate explains a figure that won't reproduce later.
 
+#### Where it went, and what to do about it
+
+A total names the damage without naming one thing anyone can change. These four
+do, and each is a lever rather than a number to admire. Report a lever only when
+it is actually large — a $0.02 line spends the reader's attention on nothing.
+
+- **`effort`** — the reasoning effort mix, e.g. `"100% high across 290 turns"`.
+  Report it whenever `dominant_share` is high, because it is one of the few
+  levers here the user controls directly and most people have never seen it
+  quantified. `"unset"` is a turn that recorded no effort field: unrecorded, not
+  a low setting, so never report it as "low".
+- **`thinking_carry_usd`** — reasoning is billed once as output and then re-read
+  as cache on every later turn. This is that re-reading. On a long session it
+  runs to ~10% of the total, which is the argument for shorter sessions rather
+  than for less thinking.
+- **`cache_reestablish`** — the prefix expired and was rebuilt at 1.25x/2.00x
+  input instead of read at 0.10x. Read `usd` against `total_usd`; a third of the
+  bill is a realistic figure here. Then read `detail[].idle_s`, because the gap
+  is what makes it actionable: a long gap means the context aged out while the
+  session sat parked, and a short one means it was rebuilt for another reason —
+  a resume, a context edit — which is not something the user did wrong.
+  **Do not recommend a TTL setting.** Whether a longer TTL is reachable from
+  Claude Code is unverified, and every write on this machine is already 1h.
+- **`tool_context`** — which tools put the tokens in the window, ranked by
+  `carry_usd`. `avg_tokens` is the per-call figure worth quoting. This is
+  approximate by construction (see contract invariant 14), and
+  `work.tool_context_coverage.unmatched` must be read first: a short table with
+  unmatched results means partial coverage, **not** light tool use.
+
+#### Skills: what a `by_skill` row does and does not say
+
+`by_skill` is spend **while a skill held attribution** — window length times
+resident context. It is not what the skill cost to run, and it will rank a cheap
+skill invoked late in a big session above an expensive one invoked early.
+
+- Quote **`usd_per_turn`** alongside `usd`, never `usd` alone. They routinely
+  disagree: in one measured session `claude-api` led on total ($2.56 vs $1.99)
+  while `lastcall` led per turn ($0.248 vs $0.160).
+- For "is this skill expensive to load?", the metric is
+  **`work.skill_load[].load_tokens`**, and it is an upper bound. Use it to rank
+  skills, not to quote an absolute; treat `runs: 1` as the weakest reading; and
+  `null` means the measurement was degenerate — **unmeasured, not free**.
+- The `skill: null` row is the unattributed remainder. Label it as such and keep
+  it, or the parts stop summing to the whole. It is not "pre-attribution turns":
+  attribution releases back to null and null appears interleaved throughout.
+
 ---
 
 ## Productivity: ratios, never a score

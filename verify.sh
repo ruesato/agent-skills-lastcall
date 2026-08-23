@@ -103,6 +103,37 @@ for f in "$PROJECTS"/*/*.jsonl; do
        >/dev/null 2>&1; then ok
   else bad "cost $sid: by_skill does not sum to total_usd"; fi
 
+  # A re-establishment event is a cache WRITE, so it can never outnumber the
+  # turns that wrote cache, and its dollars are a slice of the total. Both
+  # bounds are structural: violating either means the event scan drifted off
+  # the turns it is supposed to be scanning.
+  if printf '%s' "$c" | jq -e 'if has("cache_reestablish") then
+         (.cache_reestablish | .events <= .writing_turns and .usd >= 0) else true end' \
+       >/dev/null 2>&1; then ok
+  else bad "cost $sid: cache_reestablish events exceed writing turns"; fi
+
+  # Thinking carry is re-reading output that was already billed once, so it is
+  # bounded by the total. A carry larger than the whole session means the carry
+  # weight is being multiplied by the wrong turn count.
+  if printf '%s' "$c" | jq -e 'if has("thinking_carry_usd") then
+         (.thinking_carry_usd >= 0 and .thinking_carry_usd <= .total_usd + 0.01) else true end' \
+       >/dev/null 2>&1; then ok
+  else bad "cost $sid: thinking_carry_usd out of bounds"; fi
+
+  # Every tool_result must be attributable to the call that produced it. This
+  # caught a real defect: the id map was read off the DEDUPED turns, whose first
+  # streaming chunk usually holds no tool_use block, and 266 of 318 results went
+  # unmatched while the table just looked like light tool usage.
+  if printf '%s' "$out" | jq -e '.work.tool_context_coverage
+         | .matched + .unmatched == .results and .unmatched == 0' >/dev/null 2>&1; then ok
+  else bad "meter $sid: tool_context left tool results unmatched"; fi
+
+  # load_tokens is null or positive, NEVER zero. Zero would claim a skill loaded
+  # for free, where the truth is that the deltas were degenerate.
+  if printf '%s' "$out" | jq -e '[.work.skill_load[]? | .load_tokens
+         | select(. != null and . <= 0)] | length == 0' >/dev/null 2>&1; then ok
+  else bad "meter $sid: skill_load reports a zero load_tokens instead of null"; fi
+
   # openloops.sh cds into the cwd the METER reports, so the caller location is
   # irrelevant — and the metered cwd is the live one even for a split session,
   # while the cwd recorded at the top of the file may be the pre-rename path.
@@ -164,6 +195,34 @@ rm -f "$LEDGER.thin"
 
 if "$S/doctrine-check.sh" "$HERE" | jq -e '.status' >/dev/null 2>&1; then ok
 else bad "doctrine-check"; fi
+# memory_system is a label for the host harness store, so it must follow the
+# override rather than assert one this environment may not use.
+if [ "$(LASTCALL_MEMORY_SYSTEM=zz/store.md "$S/doctrine-check.sh" "$HERE" \
+        | jq -r '.memory_system')" = "zz/store.md" ]; then ok
+else bad "doctrine-check: memory_system ignores LASTCALL_MEMORY_SYSTEM"; fi
+if [ "$("$S/doctrine-check.sh" "$HERE" | jq -r '.memory_system')" = "memory/MEMORY.md" ]; then ok
+else bad "doctrine-check: memory_system default changed"; fi
+
+# memory-check.sh must catch each way a memory write silently fails to land.
+# Built as a table because the value of this script is entirely in what it
+# REJECTS — a version that returns ok:true for everything would pass a smoke
+# test and cover nothing.
+mem="$(mktemp -d "$TMP/lastcall-mem.XXXXXX")"
+printf -- '- [Good](good.md) — hook\n' > "$mem/MEMORY.md"
+printf -- '---\nname: good\ndescription: d\nmetadata:\n  type: project\n---\n\nBody.\n' > "$mem/good.md"
+printf -- '---\nname: unindexed\ndescription: d\nmetadata:\n  type: project\n---\n\nBody.\n' > "$mem/unindexed.md"
+printf -- 'no frontmatter\n' > "$mem/nofm.md"
+printf -- '---\nname: bad\ndescription: d\nmetadata:\n  type: bogus\n---\n\nBody.\n' > "$mem/badtype.md"
+for case in "good:true" "unindexed:false" "nofm:false" "badtype:false" "missing:false"; do
+  want="${case#*:}"; f="${case%%:*}"
+  got="$("$S/memory-check.sh" --store "$mem" "$mem/$f.md" | jq -r '.ok')"
+  if [ "$got" = "$want" ]; then ok
+  else bad "memory-check: $f reported ok=$got, expected $want"; fi
+done
+# Claiming nothing is a legitimate outcome and must not read as a failure.
+if [ "$("$S/memory-check.sh" | jq -r '.ok, .claimed' | tr '\n' ' ')" = "true 0 " ]; then ok
+else bad "memory-check: no-files case is not a clean pass"; fi
+rm -rf "$mem"
 say "  invariants checked"
 
 # ---------------------------------------------------------------- fixtures

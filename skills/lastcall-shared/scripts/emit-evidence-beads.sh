@@ -61,11 +61,22 @@ issues="$(cd "$cwd" && bd list --all --limit 0 --json --skip-labels 2>/dev/null)
 # session commit to every task would inflate grounding: the point of artifacts
 # is that a claim earns trust, so a task nothing references stays empty and is
 # reported as unverified. That is the honest outcome, not a gap to paper over.
+#
+# A SHA git cannot resolve is REPORTED, not swallowed. Silently skipping it
+# strips a task of its grounding and reports it unverified with nothing saying
+# why — the inverse of the discipline the rest of this codebase keeps, where
+# absence is visible (files_coverage.attributed, the native block in
+# meter-session.sh, the unparseable-evidence warning). It stays non-fatal: a bad
+# SHA should degrade grounding, not lose the evidence file.
 commits='[]'
 if [ "$#" -gt 0 ] && [ -n "$cwd" ]; then
   commits="$(cd "$cwd" && for sha in "$@"; do
+      if ! git rev-parse --verify --quiet "${sha}^{commit}" >/dev/null 2>&1; then
+        echo "emit-evidence-beads: cannot resolve commit $sha in $PWD; grounding for any task it names will be missing" >&2
+        continue
+      fi
       subj="$(git log -1 --format='%s%n%b' "$sha" 2>/dev/null || true)"
-      [ -n "$subj" ] && jq -cn --arg sha "$sha" --arg msg "$subj" '{sha: $sha, msg: $msg}'
+      jq -cn --arg sha "$sha" --arg msg "$subj" '{sha: $sha, msg: $msg}'
     done | jq -sc '.')"
 fi
 

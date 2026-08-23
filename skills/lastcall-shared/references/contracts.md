@@ -76,7 +76,14 @@ downstream from `references/pricing.md` so this contract stays correct.
     // session was about, never that anything landed. null when the session
     // never got one. The only qualitative input available for a session the
     // reader was not present for.
-    "ai_title": "Support multiple code forges in skill project"
+    "ai_title": "Support multiple code forges in skill project",
+
+    // Reasoning effort, rolled up from the per-turn field Claude Code has
+    // always recorded and nothing downstream ever reported. It is one of the
+    // few levers in this row the user actually controls. "unset" is a turn that
+    // carried no effort field — unrecorded, not a low setting.
+    "effort": { "mix": { "high": 290 }, "turns": 290,
+                "dominant": "high", "dominant_share": 1.0 }
   },
 
   // One row per (model, lane, speed, service_tier). Never collapse these:
@@ -90,6 +97,11 @@ downstream from `references/pricing.md` so this contract stays correct.
       "turns": 211, "input": 396, "output": 148499,
       "cache_read": 35035360, "cache_w_5m": 0, "cache_w_1h": 1107741,
       "thinking": 63846,        // SUBSET of output, never added to a total
+      // Token-weight of re-reading that reasoning on every later turn: sum over
+      // turns of thinking_i x (turns remaining after i). Billed once as output,
+      // then carried as cache_read for the rest of the session. cost.sh prices
+      // it as thinking_carry_usd at the cache_read multiplier.
+      "thinking_carry": 12554366,
       "web_search": 0, "web_fetch": 0,   // server tools; billed per REQUEST
       "efforts": { "high": 211 }         // reasoning effort -> turn count
     }
@@ -113,11 +125,56 @@ downstream from `references/pricing.md` so this contract stays correct.
     // Per-turn skill/plugin attribution, written by Claude Code itself.
     // skill: null is the unattributed remainder — plain conversational turns.
     // Keep it: without it the parts stop summing to the whole.
+    //
+    // A row measures spend WHILE a skill held attribution, which is dominated
+    // by how many turns that lasted times how much context was resident — not
+    // by the skill own overhead. It cannot answer "is this skill expensive?".
+    // See invariant 13; `skill_load` below is the metric that can.
     "skills": [
       { "skill": "claude-api", "plugin": null, "model": "claude-opus-5",
         "turns": 8, "input": 16, "output": 11340,
         "cache_read": 4049677, "cache_w_5m": 0, "cache_w_1h": 361355 }
-    ]
+    ],
+
+    // What each skill cost to LOAD: the context jump when it took attribution.
+    // Keyed on skill alone, not (skill, model), because load is a property of
+    // the skill. load_tokens is null when the deltas were degenerate — never 0.
+    "skill_load": [
+      { "skill": "lastcall:lastcall", "runs": 2,
+        "load_tokens": 7478, "approximate": true }
+    ],
+
+    // What put the tokens in the window. Cache reads are the bulk of the bill
+    // and their price is a function of what is resident, so without this a
+    // report can name a total without naming one fixable thing.
+    // carry_tokens is payload x turns that re-read it; cost.sh prices it.
+    "tool_context": [
+      { "tool": "Bash", "model": "claude-opus-5", "speed": "standard",
+        "service_tier": "standard", "calls": 174, "payload_tokens": 39174,
+        "avg_tokens": 225, "carry_tokens": 6338800 }
+    ],
+
+    // Whether the table above covers the session. A tool_result whose tool_use
+    // is not in the transcript cannot be attributed to a tool.
+    "tool_context_coverage": { "results": 272, "matched": 272, "unmatched": 0,
+                               "image_tokens_each": 1600, "approximate": true }
+  },
+
+  // Turns where a cache write rewrote at least `threshold_ratio` of what was
+  // resident — the prefix expired and was rebuilt at 1.25x/2.00x input instead
+  // of read at 0.10x. Folded into the cache_w_* aggregate, a session that paid
+  // for several full rewrites is indistinguishable from one that paid for none.
+  // Each event carries the idle gap before it. See invariant 15.
+  "cache_reestablish": {
+    "threshold_ratio": 0.5, "events": 4, "writing_turns": 289,
+    "tokens": 478700,
+    "largest": { "at": "...", "model": "claude-opus-5", "tokens": 229895,
+                 "tokens_5m": 0, "tokens_1h": 229895,
+                 "ratio": 0.934, "idle_s": 10285 },
+    "detail":  [ /* up to 10 events, largest first, each with idle_s */ ],
+    "by_model": [ { "model": "claude-opus-5", "speed": "standard",
+                    "service_tier": "standard", "events": 4,
+                    "tokens_5m": 0, "tokens_1h": 478700 } ]
   },
 
   // How much of the session is still visible to whoever is summarizing it.
@@ -223,9 +280,13 @@ Each of these silently corrupts totals if a reimplementation drops it:
    total double-counts. It exists so a jump in output tokens can be told apart
    from a jump in reasoning.
 9. **Nothing here reads conversation content.** The meter dips into
-   `message.content` exactly twice and both are filtered to structure —
-   `tool_use` names and paths, and `tool_result.is_error`. No prompts, no
-   assistant prose, no tool output bodies. Any narrative in a summary comes
+   `message.content` in four places and every one is filtered to structure —
+   `tool_use` names, ids and paths; `tool_result.is_error`; and, for
+   `work.tool_context`, the *length* of a `tool_result` body and the block
+   `type` of its parts. That last one touches the bytes of tool output, so say
+   what it does with them precisely: it measures how many there are and never
+   inspects, stores, or emits them. No prompts, no assistant prose, no tool
+   output bodies leave this script. Any narrative in a summary comes
    from the reader own context, which is present only when `lastcall` runs
    inside the session it measures. `context.compactions` and a metered id that
    differs from the current one are the two ways that silently stops being
@@ -245,6 +306,58 @@ Each of these silently corrupts totals if a reimplementation drops it:
 12. **`agent_s` is a floor, never a replacement for `active_s`.** They measure
    different things — agent busy versus human engaged — and only `active_s`
    covers the turn currently in flight.
+13. **A `work.skills` row is not a skill price tag, and attribution is not
+   sticky.** The row measures spend while a skill held attribution, which is
+   window length times resident context. A cheap skill invoked late in a large
+   session outscores an expensive one invoked early, so the row cannot answer
+   "is this skill expensive?" — `cost.sh` adds `usd_per_turn` to normalize the
+   window, and `work.skill_load[].load_tokens` is the metric for overhead.
+   **No sticky invariant.** A 2026-08-22 review proposed guaranteeing that a
+   skill row covers every turn until the next `Skill` call. It does not hold
+   here. Measured on session 31221561, every named run RELEASES back to null and
+   runs are short: `claude-api` takes attribution at turn 156, releases at 172,
+   and no further `Skill` call appears in the remaining 117 turns — under the
+   sticky model it would have held to the end. Three of its four named runs
+   begin nowhere near a `Skill` call, so attribution is not driven by that tool.
+   For the same reason `skill: null` is the **unattributed remainder** and not
+   "pre-attribution turns": null appears interleaved (136-155, 172-188, 198-281),
+   all of it after the first named run.
+14. **`work.tool_context` is approximate by construction, and payload-derived.**
+   Sizes are chars/4, and an `image` block counts at a flat
+   `tool_context_coverage.image_tokens_each` rather than by its base64 length —
+   without that a `Read` of a screenshot reports as a six-figure-token call and
+   the table becomes fiction. Attribution comes from measuring `tool_result`
+   bodies, **never** from dividing a per-turn context delta among the tools that
+   preceded it: that method loads generic per-turn growth onto whichever tool is
+   most frequent, and produced a $101 figure for `Bash` against a real payload
+   near 225 tokens per call. Read `tool_context_coverage.unmatched` before
+   reading the table — a `tool_result` whose `tool_use` is missing cannot be
+   attributed, and a thin table then means partial coverage, not light tool use.
+15. **The `cache_reestablish` threshold is a FRACTION of resident context, never
+   a token constant.** Local baseline resident is median 37.6K over a 28.9K-59.5K
+   range (`bin/baselines.sh`, 2026-08-22), so it varies ~2x between sessions and
+   any constant is tuned to one of them. The distribution is strongly bimodal —
+   p50 0.006, p95 0.053, then p99 0.892 — so 0.25 and 0.50 select 60 and 59 of
+   2909 writing turns. That insensitivity is the justification. Index 0 of each
+   transcript part is excluded: establishing a prefix the first time is
+   unavoidable and counting it would report an event in every session.
+   **No TTL configuration advice follows from this.** Whether a 1-hour TTL is
+   reachable from Claude Code is unverified, and on this machine 100% of writes
+   are already 1h — which also makes "do not leave a session parked" a weaker
+   lever than it would be at 5m. Report the events; do not prescribe a setting.
+16. **`load_tokens` is an upper bound, and null rather than 0 when degenerate.**
+   Two failure modes pull opposite ways and each has its own correction: a
+   one-turn window reads LOW because the load has not landed (`claude-api`
+   measured +0.6K at one turn against +29.5K at two), so the max across a wider
+   window is taken; and every window is contaminated by whatever else those
+   turns pulled in, which only ever ADDS, so the smallest reading across runs
+   wins. Contamination survives both when `runs` is 1 — measured 2026-08-23,
+   `lastcall:lastcall` reads 8326 and 7478 across two sessions against a 3.2K
+   `SKILL.md`, while a single-run `claude-api` reads 355201 because a genuine
+   350K context jump landed in the same turn. So: use it to RANK skills and to
+   check against a `SKILL.md` size, never to quote an absolute, and treat a
+   `runs: 1` figure as the weakest of them. `load_tokens: null` means the deltas
+   were degenerate — unmeasured, not free.
 
 ---
 
@@ -342,6 +455,11 @@ the session commit SHAs as arguments, and writes one file per run:
   intended outcome, not a gap.
 - No beads workspace, no `bd`, or no window: exits 0 silently and writes
   nothing. Absence is the normal case.
+- A SHA git cannot resolve **warns to stderr** and the run continues. Dropping
+  it silently would strip a task of its grounding and report it unverified with
+  nothing saying why — the inverse of `files_coverage.attributed` and the rest
+  of the absence-is-visible discipline here. A bad SHA degrades grounding; it
+  does not lose the evidence file.
 - The workspace is found by walking up from the session `cwd`, falling back to
   `$PWD` when the recorded path no longer exists — a renamed directory leaves
   every later row pointing at a path that is gone (5 of 26 sessions here).
@@ -384,7 +502,10 @@ Global across projects, with `cwd` as a filterable field. Written by
   "cost": {
     "usd": 4.18,
     "by_model": [ { "model": "claude-opus-5", "lane": "main", "usd": 3.91 } ],
-    "by_skill": [ { "skill": "claude-api", "plugin": null, "usd": 0.27 } ],
+    // usd_per_turn normalizes the window; see invariant 13 for why the raw
+    // usd cannot be read as what the skill costs.
+    "by_skill": [ { "skill": "claude-api", "plugin": null, "usd": 0.27,
+                    "turns": 16, "usd_per_turn": 0.1598 } ],
     "pricing_source": "claude-api@2026-08-18",  // which rate table produced this
     "promo_applied": true,                      // any lane billed at a promo rate
     "promo_models": ["claude-sonnet-5"],        // which ones

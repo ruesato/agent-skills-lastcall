@@ -12,6 +12,28 @@ set -euo pipefail
 ROOT="${CLAUDE_PROJECTS:-$HOME/.claude/projects}"
 IDLE_GAP_S="${IDLE_GAP_S:-300}"
 
+# A cache write counts as a re-establishment when it rewrites this fraction of
+# what was already resident. A FRACTION, never a constant: local baseline
+# resident context is median 37.6K with a 28.9K-59.5K range (bin/baselines.sh,
+# 2026-08-22), so it varies ~2x across sessions and any fixed token cutoff is
+# tuned to one of them. The distribution is strongly bimodal — p50 0.006, p95
+# 0.053, then p99 0.892 — so 0.25 and 0.50 select 60 and 59 turns out of 2909.
+# That insensitivity is the reason a fraction is the right shape here.
+REEST_RATIO="${LASTCALL_REESTABLISH_RATIO:-0.5}"
+
+# How many turns after a skill takes attribution to look for the context jump
+# that loading it caused. One turn is the WRONG window and not by a little:
+# measured on session 31221561, claude-api reads +0.6K at one turn and +29.5K at
+# two. The max over the window is taken, never the first delta.
+LOAD_WINDOW="${LASTCALL_LOAD_WINDOW:-4}"
+
+# Flat estimate for an image in a tool_result. Its base64 payload is ~1.4 bytes
+# per token of actual cost, so measuring it by string length reports a Read of a
+# screenshot as a six-figure-token call and turns the whole tool table into
+# fiction. An estimate that is roughly right beats a measurement that is wildly
+# wrong; it is declared as an estimate in contracts.md.
+IMAGE_TOKENS="${LASTCALL_IMAGE_TOKENS:-1600}"
+
 # Project dir slug: every character that is not alphanumeric or "-" becomes
 # "-". Covers "/", ".", and "+" (worktree branch names like "feat+ui-refinement").
 slug() { printf '%s' "$1" | sed 's|[^a-zA-Z0-9-]|-|g'; }
@@ -135,7 +157,40 @@ agents_json() {
 # shell string, and one apostrophe ends it early — the resulting error lands far
 # from the typo. Write "the row", never "the row" with a possessive s.
 meter_file() {
-  jq -s --arg lane "$2" --argjson gap "$IDLE_GAP_S" '
+  jq -s --arg lane "$2" --argjson gap "$IDLE_GAP_S" \
+        --argjson rethr "$REEST_RATIO" --argjson loadw "$LOAD_WINDOW" \
+        --argjson img "$IMAGE_TOKENS" '
+    # Timestamps carry milliseconds, which fromdateiso8601 rejects.
+    def tsec: if . == null then null
+              else (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) end;
+
+    # What was resident in the context window for one turn: everything the
+    # request was billed for as prefix, whether it was read from cache or
+    # written into it. BOTH cache_creation buckets belong here. An earlier
+    # ad-hoc pass omitted the 1h bucket and reported the local baseline as 14.3K
+    # against a true 37.6K — a 2.6x undercount, and not a rounding error, since
+    # 100% of writes on this machine are 1h.
+    def resident:
+      ((.cache_read_input_tokens // 0)
+       + (.cache_creation.ephemeral_5m_input_tokens // 0)
+       + (.cache_creation.ephemeral_1h_input_tokens // 0));
+
+    # Size of one tool_result payload, in tokens. An ESTIMATE by construction:
+    # chars/4 for text, and a flat figure for images rather than their base64
+    # length. Applied to the tool_result blocks directly, never derived by
+    # dividing a per-turn context delta among the tools that preceded it — that
+    # method loads generic per-turn growth (assistant output, thinking, user
+    # text) onto whichever tool is called most often, and produced a $101
+    # attribution for Bash against a real payload near 235 tokens per call.
+    def payload_tokens:
+      if . == null then 0
+      elif type == "string" then (length / 4 | floor)
+      elif type == "array" then
+        ( map(if   .type == "image" then $img
+              elif .type == "text"  then ((.text // "") | length / 4 | floor)
+              else (tojson | length / 4 | floor) end) | add // 0 )
+      else (tojson | length / 4 | floor) end;
+
     # Streaming emits one entry per chunk sharing a requestId, and every chunk
     # in a group carries the SAME cumulative usage. Collapsing each group to its
     # first entry is what stops totals from inflating by the group size.
@@ -179,6 +234,123 @@ meter_file() {
     | ( map(select(.type == "assistant") | .message.content[]?
             | select(.type == "tool_use")) ) as $tools
 
+    # ------------------------------------------------ ordered turn timeline
+    # group_by sorts on its KEY, so $turns above comes out in requestId order,
+    # not in time order. Everything below is positional — carry, idle gaps,
+    # context deltas — so it re-sorts rather than inheriting that ordering.
+    | ( $turns | sort_by(.timestamp) ) as $ordered
+    | ( $ordered | length ) as $n
+    | ( [ range(0; $n) | $ordered[.].message.usage | resident ] ) as $resid
+
+    # Thinking tokens are billed once as output, then re-read as cache on every
+    # later turn of the same context. This is the WEIGHT of that carry: tokens
+    # times the number of turns that will re-read them. Pricing it belongs
+    # downstream, so this stays a token count. Computed within one transcript
+    # part, so a split session loses only the carry that straddles the seam.
+    | ( [ range(0; $n) as $i | $ordered[$i] as $t
+          | $t + { _carry: (((($t.message.usage.output_tokens_details.thinking_tokens) // 0))
+                            * ($n - 1 - $i)) } ] ) as $carried
+
+    # ------------------------------------------- cache re-establishment events
+    # When a cached prefix expires, the whole thing is rewritten at the write
+    # multiplier instead of read at 0.10x. Aggregated into cache_w_5m/1h, a
+    # session that paid for several full rewrites is indistinguishable from one
+    # that paid for none. Index 0 is excluded deliberately: establishing the
+    # prefix for the first time is unavoidable, and counting it would report an
+    # event in every session ever metered. That undercounts a resumed part,
+    # which is the conservative direction.
+    | ( [ range(1; $n) as $i | $ordered[$i] as $t | ($t.message.usage) as $u
+          | (($u.cache_creation.ephemeral_5m_input_tokens // 0)) as $w5
+          | (($u.cache_creation.ephemeral_1h_input_tokens // 0)) as $w1
+          | ($w5 + $w1) as $w
+          | ($u | resident) as $res
+          | select($w > 0 and $res > 0 and (($w / $res) >= $rethr))
+          | { at: $t.timestamp, model: $t.message.model,
+              speed: $u.speed, service_tier: $u.service_tier,
+              tokens: $w, tokens_5m: $w5, tokens_1h: $w1,
+              ratio: (($w / $res) * 1000 | round / 1000),
+              # The gap that preceded it. An expiry is a function of elapsed
+              # time, so the gap is the part of the event a person can act on.
+              idle_s: ( ($t.timestamp | tsec) as $a
+                        | ($ordered[$i-1].timestamp | tsec) as $b
+                        | if $a == null or $b == null then null else ($a - $b) end ) }
+        ] ) as $reest
+
+    # ------------------------------------------------------- per-skill load
+    # A run start is the first turn of a contiguous stretch attributed to one
+    # skill. Attribution RELEASES back to null between runs and is not driven by
+    # the Skill tool, so runs are found by scanning the attribution column
+    # rather than by looking for Skill calls.
+    | ( [ range(0; $n) as $i
+          | ($ordered[$i].attributionSkill) as $s
+          | select($s != null
+                   and ($i == 0 or ($ordered[$i-1].attributionSkill) != $s))
+          | { skill: $s, idx: $i } ] ) as $starts
+
+    # Context growth attributable to loading each skill. Two failure modes pull
+    # in opposite directions and each gets its own correction: a one-turn window
+    # reads LOW because the load has not landed yet, so take the max across a
+    # wider window; and any window is contaminated by whatever else those turns
+    # pulled in, which only ever ADDS, so take the smallest reading across runs.
+    # A degenerate measurement emits null, never 0 — unmeasured is not zero,
+    # the same discipline the native block and files_coverage keep.
+    | ( [ $starts[] | . as $st | $st.idx as $i
+          | if $i < 1 then { skill: $st.skill, load: null }
+            else ( [ range(1; $loadw + 1) as $w
+                     | ($i - 1 + $w) as $j
+                     | select($j < $n)
+                     | ($resid[$j] - $resid[$i-1]) ] | max ) as $d
+                 | { skill: $st.skill,
+                     load: (if $d == null or $d <= 0 then null else $d end) }
+            end ]
+        | group_by(.skill)
+        | map({ skill: .[0].skill, runs: length,
+                load_tokens: ([ .[] | .load | select(. != null) ] | min) }) ) as $load
+
+    # ------------------------------------------- context growth by tool
+    # tool_use blocks carry the pricing dimensions of the turn that issued them,
+    # so a payload can be priced with the same rate table as everything else.
+    #
+    # Built in two steps, and the reason is the dedup. Streaming splits one turn
+    # across chunks that share a requestId, and the deduped $turns keeps the
+    # FIRST chunk — which usually does not hold the tool_use block. Reading the
+    # map straight off $ordered matched 52 of 318 tool_results on
+    # 0fd5463b-bdc7-4b5a-900d-2dd9093f1bcb and read as thin tool usage rather
+    # than as a broken join. So index the turns by request key, then scan every
+    # assistant entry for tool_use and look its turn up.
+    | ( [ range(0; $n) as $i | $ordered[$i] as $t
+          | { key: ($t.requestId // $t.uuid),
+              value: { idx: $i, model: $t.message.model,
+                       speed: $t.message.usage.speed,
+                       service_tier: $t.message.usage.service_tier } } ]
+        | from_entries ) as $ridmap
+
+    | ( [ .[] | select(.type == "assistant") as $e
+          | ($ridmap[($e.requestId // $e.uuid)] // null) as $g
+          | select($g != null)
+          | ($e.message.content[]? | select(.type == "tool_use"))
+          | { key: (.id // ""), value: ($g + { name: .name }) } ]
+        | from_entries ) as $tumap
+
+    | ( [ .[] | select(.type == "user") | .message.content[]?
+          | select(.type == "tool_result")
+          | { id: (.tool_use_id // ""), tokens: (.content | payload_tokens) } ]
+      ) as $tres
+
+    | ( [ $tres[] | . as $r | ($tumap[$r.id] // null) as $u
+          | select($u != null)
+          | { tool: $u.name, model: $u.model, speed: $u.speed,
+              service_tier: $u.service_tier, tokens: $r.tokens,
+              # Same carry weight as thinking: a payload sits in the prefix and
+              # is re-read by every later turn.
+              carry: ($r.tokens * ([$n - 1 - $u.idx, 0] | max)) } ]
+        | group_by([.tool, .model, .speed, .service_tier])
+        | map({ tool: .[0].tool, model: .[0].model, speed: .[0].speed,
+                service_tier: .[0].service_tier,
+                calls: length,
+                payload_tokens: (map(.tokens) | add),
+                carry_tokens:   (map(.carry)  | add) }) ) as $toolctx
+
     # Compaction boundaries. Claude Code writes one system/compact_boundary
     # record per compaction, carrying how many tokens were dropped from the
     # context window. This is the only way to know that the agent summarizing a
@@ -205,7 +377,7 @@ meter_file() {
         # them would price a fast-mode session at standard rates and leave no
         # trace that it happened. Kept as recorded, so null means unrecorded
         # rather than standard.
-        usage: ( $turns
+        usage: ( $carried
                  | group_by([.message.model, .message.usage.speed, .message.usage.service_tier])
                  | map({
                    model:        .[0].message.model,
@@ -221,6 +393,9 @@ meter_file() {
                    # add it to a total; it says how much of the output was
                    # reasoning rather than reply.
                    thinking:   (map(.message.usage.output_tokens_details.thinking_tokens // 0) | add),
+                   # Token-weight of re-reading this reasoning on every later
+                   # turn. Priced downstream at the cache_read multiplier.
+                   thinking_carry: (map(._carry) | add),
                    # Server-side tools carry per-request spend, so these counts
                    # are the only trace of it anywhere in the transcript.
                    web_search: (map(.message.usage.server_tool_use.web_search_requests // 0) | add),
@@ -241,6 +416,21 @@ meter_file() {
                    cache_w_5m: (map(.message.usage.cache_creation.ephemeral_5m_input_tokens // 0) | add),
                    cache_w_1h: (map(.message.usage.cache_creation.ephemeral_1h_input_tokens // 0) | add)
                  }) ),
+        skill_load: $load,
+        reest: $reest,
+        # Turns that wrote cache at all — the denominator the event count is
+        # meaningful against. Index 0 excluded to match $reest above.
+        writing_turns: ( [ range(1; $n) as $i
+                           | $ordered[$i].message.usage
+                           | select((.cache_creation.ephemeral_5m_input_tokens // 0)
+                                    + (.cache_creation.ephemeral_1h_input_tokens // 0) > 0) ]
+                         | length ),
+        tool_context: $toolctx,
+        # A tool_result whose tool_use is not in this file — issued before a
+        # compaction, or in a part that lives under another slug. Reported, so
+        # a thin tool table reads as partial coverage rather than as low usage.
+        tool_context_coverage: { results: ($tres | length),
+                                 matched: ([ $tres[] | select($tumap[.id] != null) ] | length) },
         tools: ($tools | group_by(.name) | map({ (.[0].name): length }) | add // {}),
         files: ( $tools
                  | map(select(.name == "Edit" or .name == "Write" or .name == "NotebookEdit"))
@@ -283,7 +473,8 @@ meter_file() {
   done
   true
 } | jq -s --arg sid "$SID" --argjson agents "$(agents_json)" --argjson cap "$CAP" \
-       --argjson ev "$EV" '
+       --argjson ev "$EV" --argjson rethr "$REEST_RATIO" --argjson loadw "$LOAD_WINDOW" \
+       --argjson img "$IMAGE_TOKENS" '
     # Merge a list of {key: count} maps by SUMMING. Object "+" overwrites
     # duplicate keys rather than summing them, which is the trap this exists
     # to avoid — see CLAUDE.md.
@@ -343,7 +534,20 @@ meter_file() {
                                   rid:     (map(.rid)     | add // 0) })
                  | . + { collapsed: (.entries - .turns),
                          rid_coverage: (if .entries == 0 then null
-                                        else ((.rid / .entries * 1000 | round) / 1000) end) } )
+                                        else ((.rid / .entries * 1000 | round) / 1000) end) } ),
+        # Reasoning effort, rolled up so it can be stated without arithmetic
+        # over the token rows. Claude Code has recorded it per turn all along
+        # and nothing has ever reported it. Measured locally 2026-08-22: high on
+        # 100% of 2870 turns, which is the kind of fact that changes behaviour on
+        # sight. "unset" is a turn that carried no effort field — unrecorded,
+        # not a low setting.
+        effort: ( ( map(.usage[].efforts) | sum_maps ) as $mix
+                  | ( [ $mix[] ] | add // 0 ) as $tot
+                  | { mix: $mix, turns: $tot }
+                  + ( ($mix | to_entries | max_by(.value)) as $top
+                      | if $top == null or $tot == 0 then { dominant: null, dominant_share: null }
+                        else { dominant: $top.key,
+                               dominant_share: (($top.value / $tot * 1000 | round) / 1000) } end ) )
       },
       # Grouped by (model, lane, speed, service_tier). The last two are pricing
       # dimensions; the lane split is there because main threads and subagents
@@ -359,10 +563,38 @@ meter_file() {
                     cache_w_5m: (map(.cache_w_5m) | add),
                     cache_w_1h: (map(.cache_w_1h) | add),
                     thinking:   (map(.thinking)   | add),
+                    thinking_carry: (map(.thinking_carry // 0) | add),
                     web_search: (map(.web_search) | add),
                     web_fetch:  (map(.web_fetch)  | add),
                     efforts:    (map(.efforts) | sum_maps)
                   }) ),
+      # Cache re-establishment. A single aggregate cache_w_* figure cannot tell
+      # a session that paid for several full prefix rewrites from one that paid
+      # for none, and the two bill very differently: a rewrite costs 1.25x or
+      # 2.00x input where a read costs 0.10x. Dollars are added downstream; this
+      # keeps the token counts and the pricing dimensions to compute them with.
+      cache_reestablish: ( ( [ map(.reest) | .[][]? ] ) as $re
+        | { threshold_ratio: $rethr,
+            events:        ($re | length),
+            writing_turns: (map(.writing_turns) | add // 0),
+            tokens:        ($re | map(.tokens) | add // 0),
+            largest:       ($re | max_by(.tokens)),
+            # Each event with the gap that preceded it, largest first and capped
+            # so a pathological session cannot flood the row. The pairing is the
+            # point: a long gap says the prefix aged out, a short one says it
+            # was rebuilt for some other reason — a resume, a context edit — and
+            # only the first of those is something a person can change. Both
+            # shapes are real. Measured on 31221561, the four events read 13s,
+            # 22512s, 25404s and 10285s, all with cache_read pinned near 16.3K,
+            # which is the base prompt surviving while the conversation prefix
+            # was rewritten.
+            detail:        ($re | sort_by(-(.tokens)) | .[0:10]),
+            by_model: ($re | group_by([.model, .speed, .service_tier])
+                      | map({ model: .[0].model, speed: .[0].speed,
+                              service_tier: .[0].service_tier,
+                              events: length,
+                              tokens_5m: (map(.tokens_5m) | add),
+                              tokens_1h: (map(.tokens_1h) | add) })) } ),
       agents: $agents,
       work: {
         tools: (map(.tools) | sum_maps),
@@ -388,7 +620,38 @@ meter_file() {
                     cache_read: (map(.cache_read) | add),
                     cache_w_5m: (map(.cache_w_5m) | add),
                     cache_w_1h: (map(.cache_w_1h) | add)
-                  }) | sort_by(-(.output)) )
+                  }) | sort_by(-(.output)) ),
+        # What a skill COST to load, as distinct from what was spent while it
+        # held attribution. Those are different questions and only this one
+        # answers "is this skill expensive?" — see the caution on `skills`
+        # above. Kept out of the `skills` rows on purpose: load is a property of
+        # the skill, not of the (skill, model) pair those rows are keyed on, and
+        # repeating one value across them would look like a per-model
+        # measurement. null load_tokens means the deltas were degenerate.
+        # Smallest across parts, for the contamination reason in meter_file.
+        skill_load: ( map(.skill_load[]) | group_by(.skill)
+                      | map({ skill: .[0].skill,
+                              runs: (map(.runs) | add),
+                              load_tokens: ([ .[] | .load_tokens | select(. != null) ] | min),
+                              approximate: true }) ),
+        # What put the tokens in the window. Cache reads are the majority of the
+        # bill and their cost is a function of what is resident, so a report
+        # without this can name a total without naming one fixable thing.
+        # Keyed on the pricing dimensions so carry can be priced exactly;
+        # cost.sh collapses it to one row per tool with dollars attached.
+        tool_context: ( map(.tool_context[]) | group_by([.tool, .model, .speed, .service_tier])
+                        | map({ tool: .[0].tool, model: .[0].model, speed: .[0].speed,
+                                service_tier: .[0].service_tier,
+                                calls:          (map(.calls) | add),
+                                payload_tokens: (map(.payload_tokens) | add),
+                                carry_tokens:   (map(.carry_tokens) | add) })
+                        | map(. + { avg_tokens: ((.payload_tokens / .calls) | round) })
+                        | sort_by(-(.payload_tokens)) ),
+        tool_context_coverage: ( { results: (map(.tool_context_coverage.results) | add // 0),
+                                   matched: (map(.tool_context_coverage.matched) | add // 0),
+                                   image_tokens_each: $img }
+                                 | . + { unmatched: (.results - .matched),
+                                         approximate: true } )
       },
       # How much of this session is still VISIBLE to whoever is summarizing it.
       # Unlike the native block, zero here is a measurement rather than an

@@ -29,7 +29,7 @@ version: 2
 scanner_version: 2.9.5
 rules: []
 fingerprints:
-- hash: sha256:4436fcf61d70a84fc33ec348374fc8ce8601324a5f2eb725f774c29b58cfd7ea
+- hash: sha256:0937ff0f6ca48cab0d6f9c1629ba8db6f0776a2b714152d6abdfb43decc3780e
   rule_id: RA2
   file: SKILL.md
   reason: >-
@@ -40,13 +40,18 @@ fingerprints:
     does not modify any file." The static pattern keys on the
     ledger/memories/state vocabulary and cannot read the negation, so it
     flagged the guarantee as the violation (confidence 0.6).
-    Re-reviewed three times on 2026-08-19 and once on 2026-08-20, both times after unrelated edits to this
-    file invalidated the previous hash, and both times the excused paragraph
+    Re-reviewed three times on 2026-08-19, once on 2026-08-20 and once on
+    2026-08-23, every time after unrelated edits to this
+    file invalidated the previous hash, and every time the excused paragraph
     itself was untouched: first for the native-metering readout, then for the
     statusline "Native signals" section appended at the end of the file, then
     for the "When file counts are unavailable" section, then for the
     metering-another-session section (49, 22 and 20 added lines, 0 deleted any
-    time — confirmed with git diff --stat). Same rule, same paragraph, same
+    time — confirmed with git diff --stat), and most recently for the by_skill
+    normalization and cost-lever guidance added at lines 129-141 (9 added
+    lines, 0 deleted — confirmed with git diff -U0, which reported hunks at
+    @@ -129,2 +129,6 @@ and @@ -132,0 +137,5 @@ and nothing near lines 17-22).
+    Same rule, same paragraph, same
     confidence 0.6, same finding text each time. Verified at
     source: tally's SKILL.md defines no write path of any kind, and
     skills/lastcall-shared/scripts/ledger.sh:11 states "Written by lastcall

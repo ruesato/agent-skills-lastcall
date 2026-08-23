@@ -14,6 +14,8 @@ allowed-tools:
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/ledger.sh:*)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/doctrine-check.sh *)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/doctrine-check.sh:*)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/memory-check.sh *)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/memory-check.sh:*)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/emit-evidence-beads.sh *)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/emit-evidence-beads.sh:*)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/config.sh *)
@@ -227,6 +229,7 @@ chooses otherwise. A new option arrives unticked, not applied.
 ## 1. Meter
 
 Resolve `$METER`, `$COST`, `$OPENLOOPS`, `$LEDGER_SH`, `$DOCTRINE`,
+`$MEMCHECK` (`memory-check.sh`, used in step 5),
 `$EMIT_BEADS` (`emit-evidence-beads.sh`, used in step 7), `$CONFIG`
 (`config.sh`) and `$DETECT` (`detect.sh`, both used in section 0b) to the first
 location that exists:
@@ -275,6 +278,19 @@ against, so an unflagged understatement contaminates every later comparison.
 `by_skill` is available when the user wants to know where the money went by
 skill rather than by model. The `skill: null` row is the unattributed
 remainder — plain conversational turns — not a skill named null.
+
+**Quote `usd_per_turn` beside `usd`, never `usd` alone.** A row measures spend
+while a skill held attribution, so it is dominated by window length times
+resident context and will rank a cheap skill invoked late above an expensive one
+invoked early. For what a skill cost to load, read
+`work.skill_load[].load_tokens`, which is an upper bound and is `null` when
+unmeasured. `references/summary.md` has the full reading.
+
+`effort`, `thinking_carry_usd`, `cache_reestablish`, and `tool_context` are the
+four figures that name something changeable rather than restating the total.
+Report the ones that are actually large — `references/summary.md` says how to
+read each, including which of them must not turn into a configuration
+recommendation.
 
 ### Native signals — only when `.native` is present
 
@@ -529,6 +545,29 @@ When this ran because it was defaulted on rather than because it was ticked at
 the gate, **name every file you wrote in step 8**. That disclosure is the entire
 justification for skipping the prompt: undoing a memory is deleting a file, so
 telling the user afterwards is a fair trade, while telling them nothing is not.
+
+#### Then check that it landed
+
+```bash
+"$MEMCHECK" <every file you just wrote>
+```
+
+The doctrine check above runs *before* the write and only sees one failure path.
+This one runs after and covers the rest: a `Write` that was denied, frontmatter
+the recall step cannot parse, a file that never got an index line, or a doctrine
+vector the scan cannot see. All of those end with the store unchanged and a
+readout that says "saved 2 memories".
+
+**If `ok` is false, say so in step 8 and do not report the memories step as
+successful.** Report the `problems` array as written — each entry names a file
+and what is wrong with it, which is enough to fix by hand. Re-writing the file
+once is reasonable if the problem is yours to fix (bad frontmatter, missing
+index line); a denied `Write` is the user's call, so surface it rather than
+retrying. Skipping the check because the write "obviously worked" defeats the
+one failure mode it exists for — this failure always looks like success.
+
+If the memories delegation deliberately wrote nothing, do not run this. It
+reports `claimed: 0`, which is honest but says nothing you did not know.
 
 ### Report
 

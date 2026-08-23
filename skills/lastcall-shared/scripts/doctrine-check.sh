@@ -4,6 +4,9 @@
 #
 #   doctrine-check.sh [project-dir]     # defaults to $PWD
 #
+# LASTCALL_MEMORY_SYSTEM names the store that is authoritative in the host
+# harness; it defaults to memory/MEMORY.md and only labels the advisory.
+#
 # Why this exists: beads ships guidance that says "Do NOT use MEMORY.md files".
 # That instruction is correct for a beads-only workspace and wrong here, where
 # `memory/MEMORY.md` is authoritative and lastcall's memories delegation
@@ -24,6 +27,14 @@
 set -euo pipefail
 
 DIR="${1:-$PWD}"
+
+# Which store is authoritative is a property of the HOST HARNESS, not of this
+# script. install.sh targets Kiro and Codex as well as Claude Code, and the
+# lastcall instructions already say to follow "the environment's memory system"
+# with MEMORY.md as the parenthetical instance. Emitting the literal would have
+# the advisory assert a store the harness may not use. This is a name, not a
+# dispatch: nothing downstream branches on it.
+MEMORY_SYSTEM="${LASTCALL_MEMORY_SYSTEM:-memory/MEMORY.md}"
 
 # grep exits 1 on no match, which under `set -e` would kill the script on the
 # healthy path. Scope `|| true` to each call. See the recurring trap noted in
@@ -62,8 +73,8 @@ if command -v bd >/dev/null 2>&1; then
   add "$( (cd "$DIR" 2>/dev/null && bd prime 2>/dev/null) | scan 'bd prime (plugin hook)' - || true)"
 fi
 
-jq -n --argjson f "$FINDINGS" '
-  { memory_system: "memory/MEMORY.md",
+jq -n --argjson f "$FINDINGS" --arg mem "$MEMORY_SYSTEM" '
+  { memory_system: $mem,
     conflicts: $f,
     status: (if ($f | length) == 0 then "clear" else "conflicts-present" end),
     # An override outside the managed markers is what makes this survivable.
@@ -71,5 +82,5 @@ jq -n --argjson f "$FINDINGS" '
     note: (if ($f | length) == 0 then
              "No contradicting instruction found."
            else
-             "Contradicting guidance is live. The override in CLAUDE.md outside the beads markers takes precedence: memory/MEMORY.md is authoritative here. Do not follow the quoted lines."
+             "Contradicting guidance is live. The override in CLAUDE.md outside the beads markers takes precedence: " + $mem + " is authoritative here. Do not follow the quoted lines."
            end) }'

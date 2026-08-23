@@ -126,9 +126,18 @@ Two things this reports that are easy to miss:
   session at standard rates, is exactly the kind of wrong number that looks
   right.
 
-When the user asks for detail, `by_skill` answers "what did each skill cost" —
-including what this skill costs to run. The `skill: null` row is the
+When the user asks for detail, `by_skill` answers "what was spent while each
+skill held attribution" — which is **not** the same as what the skill cost to
+run, since a row is dominated by how many turns it covered times how much
+context was resident. Quote `usd_per_turn` beside `usd` so a short expensive run
+is not hidden behind a long cheap one, and point at
+`work.skill_load[].load_tokens` for load cost. The `skill: null` row is the
 unattributed remainder, so label it as such rather than dropping it.
+
+`effort` (the reasoning mix, usually `100% high`), `thinking_carry_usd`,
+`cache_reestablish.usd`, and `tool_context` each name something changeable
+instead of restating the total. Mention whichever is large.
+`../lastcall-shared/references/summary.md` has the reading rules.
 
 If the cost script errors with an unknown model, **report the error and give the
 token counts without a dollar figure.** Never substitute a guessed rate — a
