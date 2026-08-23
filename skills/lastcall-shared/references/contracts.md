@@ -325,6 +325,24 @@ disk — and nothing guarantees a third-party producer's files survive there.
 - Bump `schema` on any breaking change. Consumers reject unknown major versions
   loudly rather than guessing.
 
+### Shipped producer: `emit-evidence-beads.sh`
+
+Derives evidence from a beads workspace, so the seam is filled by a script
+rather than by an agent remembering to emit. Reads meter output on stdin, takes
+the session commit SHAs as arguments, and writes one file per run:
+
+- A bead closed inside `[started, ended]` becomes `completed`; one moved to
+  `in_progress` in that window becomes `partial`; `blocked` maps through.
+- `artifacts` are only the commits whose message **names the bead**. Attaching
+  every session commit to every task would manufacture grounding, so a task
+  nothing references stays empty and is reported `unverified`. That is the
+  intended outcome, not a gap.
+- No beads workspace, no `bd`, or no window: exits 0 silently and writes
+  nothing. Absence is the normal case.
+- The workspace is found by walking up from the session `cwd`, falling back to
+  `$PWD` when the recorded path no longer exists — a renamed directory leaves
+  every later row pointing at a path that is gone (5 of 26 sessions here).
+
 ### Rules for consumers
 
 - Glob all `*.json`; skip unparseable files with a warning rather than aborting.

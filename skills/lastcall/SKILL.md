@@ -14,6 +14,8 @@ allowed-tools:
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/ledger.sh:*)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/doctrine-check.sh *)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/doctrine-check.sh:*)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/emit-evidence-beads.sh *)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/emit-evidence-beads.sh:*)
 ---
 
 # lastcall
@@ -44,8 +46,9 @@ delegation, and never let one delegation's failure abort the others.
 
 ## 1. Meter
 
-Resolve `$METER`, `$COST`, `$OPENLOOPS`, `$LEDGER_SH`, and `$DOCTRINE` to the
-first location that exists:
+Resolve `$METER`, `$COST`, `$OPENLOOPS`, `$LEDGER_SH`, `$DOCTRINE`, and
+`$EMIT_BEADS` (`emit-evidence-beads.sh`, used in step 7) to the first location
+that exists:
 
 1. `${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/<script>` — substituted in
    Claude Code, and matches the `allowed-tools` grants above, so it runs without
@@ -347,8 +350,18 @@ Meter **again**, now that delegation is done:
 
 ```bash
 M2="$("$METER" ${CLAUDE_SESSION_ID})"
+printf '%s' "$M2" | "$EMIT_BEADS" <sha> ...     # no-op without a beads workspace
 printf '%s' "$M2" | "$LEDGER_SH" append <sha> ...
 ```
+
+`emit-evidence-beads.sh` runs **before** the append, because `ledger.sh` reads
+the drop-box while building the row. It derives one `lastcall.evidence/1` file
+from beads closed inside the session window, and exits 0 silently when there is
+no beads workspace — the normal case for most projects. Pass it the same SHAs:
+a commit whose message names a bead becomes that task's artifact, and a
+`completed` task with no artifact is reported as `unverified` rather than
+counted. That is the grounding rule reaching into the evidence layer, so do not
+invent artifacts to make the number look better.
 
 Why twice: the first reading was taken before this skill did its own work, so it
 understates the session by exactly the amount `lastcall` cost. The second
