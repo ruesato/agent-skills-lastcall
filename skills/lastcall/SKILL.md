@@ -22,11 +22,15 @@ allowed-tools:
 
 Measure the session, say what landed, **ask**, then act.
 
-`allowed-tools` above pre-approves the five bundled scripts — all read-only.
-It deliberately does **not** pre-approve `git commit`, `Write`, or the tracker.
-Those still go through the normal permission prompt, so the gate in step 5 is
-backed by a second, independent check rather than being the only thing standing
-between a suggestion and a durable action.
+`allowed-tools` above pre-approves the bundled scripts and nothing else. They
+measure; none of them takes an outward-facing action. `git commit`, `Write`, and
+the tracker are deliberately absent. Do not read that absence as a backstop: a
+user's own `permissions.allow` entries — user-level or per-project — can
+pre-approve those tools independently, and a blanket grant on `git commit` is a
+common one. Where such a grant exists no prompt fires, and the gate in step 5 is
+the **only** thing standing between a suggestion and a durable action. Assume
+that is the case. Whatever else later becomes a configurable default, the commit
+gate stays mandatory and always asked.
 
 ## The one rule
 

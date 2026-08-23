@@ -139,6 +139,24 @@ non-invocable container that declares no tools because it can invoke none.
 cleared it, which is better than suppressing a whole-skill least-privilege rule
 that would then mask a real finding later.
 
+A third instance of the same class, found 2026-08-22 while correcting the
+`allowed-tools` paragraph: **naming a config path in prose trips AS1** ("Agent
+Config Directory Access"). Writing the literal settings-file path in a sentence
+*explaining* that a user may have allowlisted `git commit` scored HIGH, and a
+nearby clause about writing "the ledger row, the evidence drop-box" tripped RA2.
+Neither described an action the skill takes. Naming `permissions.allow` as the
+mechanism, scoped as "user-level or per-project", carries the same information
+without the literal path. The pattern across LP3, AS1 and RA2 is consistent:
+**the scanner reads prose as behaviour**, so a paragraph documenting a hazard
+looks identical to one performing it. Reword before reaching for a suppression.
+
+Also note the local/CI version split: the installed scanner is v2.9.6 while
+`.github/workflows/skillspector.yml` pins v2.9.5 and `.skillspector-baseline.yaml`
+is calibrated to 2.9.5. So a local run reports a version-mismatch warning and
+resurfaces the `tally` RA2 fingerprint while CI stays green. **Do not re-baseline
+to the local version** — that would invert the problem and break CI. Scan locally
+to check your own skill is clean, and read a `tally`-only failure as drift.
+
 ## Architecture Overview
 
 Builds two Claude Code skills for closing out agentic work sessions:
