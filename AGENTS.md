@@ -163,6 +163,14 @@ claim session end. `/lastcall` is the entry point; the resolution is:
 `/lastcall` gates every durable action on explicit user approval, which is a
 stronger guarantee than the conservative profile's "ask first", not a weaker one.
 
+**When to run it after Fathom.** When the `execute` skill finishes an issue —
+the point where it prints its step-12 final summary — invoke `/lastcall` to
+meter the session and write the ledger row. Per **issue**, not per task: that
+matches Fathom's unit of work (one issue to one review, or to one stack of
+reviews) and keeps the baseline from being diluted by many short rows. There is
+no double-commit risk, because the commit delegation is skipped automatically
+when Fathom leaves a clean tree (the `git.dirty` precondition).
+
 **Quality gates stay manual on purpose.** A test command that exits non-zero is
 indistinguishable in a transcript from a grep that matched nothing, so test state
 is never inferred from exit codes. Report what you actually observed, or nothing.

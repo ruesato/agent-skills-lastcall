@@ -191,11 +191,19 @@ the only local option, not a workaround.
   nothing, so test state is never inferred. `lastcall`'s user gate is a stronger
   guarantee than the conservative profile's "ask first", not a weaker one: it asks
   per durable action. The overlap is documented in `skills/lastcall/SKILL.md`.
+  **Run it per issue, after Fathom.** When the `execute` skill finishes an issue
+  (its step-12 final summary), invoke `/lastcall` to meter the session and write
+  the ledger row. Per issue, not per task — that matches Fathom's unit of work
+  and keeps the baseline from being diluted by many short rows. No double-commit
+  risk: the commit delegation is skipped when Fathom leaves a clean tree
+  (`git.dirty` precondition).
 - **Cost math stays out of the meter.** The meter counts tokens; pricing is applied
   downstream from the `claude-api` skill. Never hardcode rates.
 - **Evidence is a drop-box.** External skills contribute work summaries by writing
-  JSON to `<session>/evidence/*.json`. `/lastcall` globs that directory, so it needs
-  no per-skill integration code.
+  JSON to `~/.claude/lastcall/evidence/<session-id>/*.json` (override with
+  `LASTCALL_EVIDENCE_DIR`). `/lastcall` globs that directory, so it needs no
+  per-skill integration code. Keyed on session id alone, so a directory rename
+  or a `--worktree` session still finds its own evidence.
 - **Grounding rule for summaries**: every claim must trace to an artifact — a file
   path, commit SHA, task ID, or test result. Never summarize from conversational
   narrative alone; transcripts are full of intentions that never landed.
