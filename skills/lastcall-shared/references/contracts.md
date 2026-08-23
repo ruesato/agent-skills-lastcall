@@ -130,7 +130,10 @@ downstream from `references/pricing.md` so this contract stays correct.
 
   "friction": { "tool_errors": 7, "interrupts": 1, "denials": 0 },
 
-  "evidence": [],                                    // filled from contract 2
+  // Filled from the contract 2 drop-box, deduped on (source, task.id) keeping
+  // the highest emitted_at. [] means no producer wrote anything, which is the
+  // normal case. openloops.sh narrows this to partial/blocked for Open loops.
+  "evidence": [],
 
   // OPTIONAL, and absent on most sessions. Present only when the opt-in
   // statusLine capture (capture-statusline.sh) wrote a payload for this

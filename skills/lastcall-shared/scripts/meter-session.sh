@@ -75,6 +75,32 @@ done
 # API response. A corrupt or foreign file is treated as absent too. Everything
 # downstream omits the native block entirely rather than emitting zeroes — a
 # session reporting 0% of the rate limit used would read as plenty of headroom.
+# The evidence drop-box (contracts.md section 2). Same pattern as CAPFILE above:
+# a lastcall-owned store, absent by default, skipped silently when it is not
+# there. Read here rather than left for a downstream caller because the slot at
+# the bottom of this file was documented as "filled from contract 2" and nothing
+# ever filled it -- openloops.sh reads $m.evidence, so partial and blocked tasks
+# were recorded in the ledger counts and silently dropped from the report the
+# user actually reads. Deduped on (source, task.id) keeping the highest
+# emitted_at, per the consumer rules in contracts.md.
+EVDIR="${LASTCALL_EVIDENCE_DIR:-$HOME/.claude/lastcall/evidence}/$SID"
+EV='[]'
+if [ -d "$EVDIR" ]; then
+  evfiles=("$EVDIR"/*.json)
+  if [ -e "${evfiles[0]}" ]; then
+    evok=()
+    for f in "${evfiles[@]}"; do
+      if jq -e . "$f" >/dev/null 2>&1; then evok+=("$f")
+      else echo "meter: skipping unparseable evidence $f" >&2; fi
+    done
+    if [ ${#evok[@]} -gt 0 ]; then
+      EV="$(jq -s -c '
+        map(. as $d | (.tasks // [])[] | {source: $d.source, emitted_at: $d.emitted_at} + .)
+        | group_by([.source, .id]) | map(max_by(.emitted_at))' "${evok[@]}")" || EV='[]'
+    fi
+  fi
+fi
+
 CAPFILE="${LASTCALL_STATUSLINE_DIR:-$HOME/.claude/lastcall/statusline}/$SID.json"
 CAP=null
 if [ -f "$CAPFILE" ]; then
@@ -256,7 +282,8 @@ meter_file() {
     [ -f "$f" ] && meter_file "$f" subagent
   done
   true
-} | jq -s --arg sid "$SID" --argjson agents "$(agents_json)" --argjson cap "$CAP" '
+} | jq -s --arg sid "$SID" --argjson agents "$(agents_json)" --argjson cap "$CAP" \
+       --argjson ev "$EV" '
     # Merge a list of {key: count} maps by SUMMING. Object "+" overwrites
     # duplicate keys rather than summing them, which is the trap this exists
     # to avoid — see CLAUDE.md.
@@ -378,8 +405,9 @@ meter_file() {
         interrupts:  (map(.friction.interrupts)  | add),
         denials:     (map(.friction.denials)     | add)
       },
-      # Slot for external work evidence (Fathom et al). Populated downstream.
-      evidence: []
+      # External work evidence, read from the drop-box at the top of this file.
+      # [] means no producer wrote anything, which is the normal case.
+      evidence: $ev
     }
 
     # ---------------------------------------------------------------- native

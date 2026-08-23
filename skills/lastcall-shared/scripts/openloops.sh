@@ -125,5 +125,7 @@ jq -n --argjson m "$METER" --argjson git "$GIT" --argjson dirty "$DIRTY" \
 
       # Carried through from the evidence drop-box: open loops the producing
       # skill already knows about (status partial / blocked).
-      evidence_open: ($m.evidence // [])
+      evidence_open: [ ($m.evidence // [])[]
+                       | select(.status == "partial" or .status == "blocked")
+                       | { source, id, title, status } ]
     }'
