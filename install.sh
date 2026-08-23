@@ -24,7 +24,7 @@ SKILLS=(lastcall tally lastcall-shared)
 # user who had none suppresses footer keyboard hints including "esc to
 # interrupt". Opting in is one line the user adds themselves — see the README.
 BINSCRIPTS=(meter-session.sh cost.sh ledger.sh openloops.sh doctrine-check.sh
-            capture-statusline.sh emit-evidence-beads.sh)
+            capture-statusline.sh emit-evidence-beads.sh config.sh)
 
 # Fixed absolute home for the scripts. Kiro has no skill-directory variable, so
 # a relative path from a SKILL.md cannot be executed there — the skills fall
@@ -89,7 +89,7 @@ if [ "$MODE" = uninstall ]; then
   for s in "${BINSCRIPTS[@]}"; do
     if [ -L "$BIN/$s" ]; then rm "$BIN/$s"; echo "  removed $BIN/$s"; fi
   done
-  echo "Uninstalled. Left ~/.claude/lastcall/ledger.jsonl in place."
+  echo "Uninstalled. Left ~/.claude/lastcall/ledger.jsonl and config.json in place."
   exit 0
 fi
 

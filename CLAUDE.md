@@ -139,23 +139,39 @@ non-invocable container that declares no tools because it can invoke none.
 cleared it, which is better than suppressing a whole-skill least-privilege rule
 that would then mask a real finding later.
 
-A third instance of the same class, found 2026-08-22 while correcting the
-`allowed-tools` paragraph: **naming a config path in prose trips AS1** ("Agent
-Config Directory Access"). Writing the literal settings-file path in a sentence
-*explaining* that a user may have allowlisted `git commit` scored HIGH, and a
-nearby clause about writing "the ledger row, the evidence drop-box" tripped RA2.
-Neither described an action the skill takes. Naming `permissions.allow` as the
-mechanism, scoped as "user-level or per-project", carries the same information
-without the literal path. The pattern across LP3, AS1 and RA2 is consistent:
-**the scanner reads prose as behaviour**, so a paragraph documenting a hazard
-looks identical to one performing it. Reword before reaching for a suppression.
+More instances of the same class, all found 2026-08-22/23 while editing
+`skills/lastcall/SKILL.md`. **The scanner reads prose as behaviour**, so a
+paragraph documenting a hazard looks identical to one performing it. Every one
+of these was cleared by rewording, and none of them described an action the
+skill takes:
+
+| Rule | Fired on the literal phrase |
+|---|---|
+| AS1 Agent Config Directory Access | the settings-file path, written while *explaining* that a user may have allowlisted `git commit` |
+| RA2 Session Persistence | "the ledger row, the evidence drop-box"; separately a span starting "create anything." |
+| EA2 Autonomous Decision Making | "without asking" |
+| P4 Behavior Manipulation | "never tell them" |
+
+AS1 is narrower than it first looked: `SKILL.md` carries a literal
+`~/.claude/lastcall/...` path today and still scores 0, so it is the *agent
+config* file specifically that trips it, not any path under `~/.claude`. Naming
+`permissions.allow` as the mechanism carried the same information safely.
+
+**Diagnosing a hit cheaply:** `REPORT_DIR=<dir> ./bin/scan-skills.sh <skill>`
+then `jq '.issues' <dir>/<skill>.json` prints the exact matched string. That
+turns a vague MEDIUM into a one-line fix and is much faster than bisecting the
+edit.
 
 Also note the local/CI version split: the installed scanner is v2.9.6 while
 `.github/workflows/skillspector.yml` pins v2.9.5 and `.skillspector-baseline.yaml`
-is calibrated to 2.9.5. So a local run reports a version-mismatch warning and
-resurfaces the `tally` RA2 fingerprint while CI stays green. **Do not re-baseline
-to the local version** — that would invert the problem and break CI. Scan locally
-to check your own skill is clean, and read a `tally`-only failure as drift.
+is calibrated to 2.9.5. So a local run warns about the mismatch and resurfaces
+the `tally` RA2 fingerprint while CI stays green. **Do not re-baseline to the
+local version** — that would invert the problem and break CI. Scan locally to
+confirm your own skill is clean, and read a `tally`-only failure as drift.
+
+Useful property when editing `lastcall`: it has **no** baseline fingerprint of
+its own and scores 0, so it has no cushion — any finding on it is unambiguously
+from the edit in hand.
 
 ## Architecture Overview
 

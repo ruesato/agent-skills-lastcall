@@ -1,6 +1,6 @@
 # Contracts
 
-The three interfaces that must not drift. Everything else in this project is
+The four interfaces that must not drift. Everything else in this project is
 implementation detail and can change freely.
 
 Written first, before any skill, because Fathom is being built in parallel and
@@ -433,3 +433,140 @@ Global across projects, with `cwd` as a filterable field. Written by
 - **Absent evidence is recorded as absent**, never as zero completed tasks.
   A session with no evidence files reports "not assessed" — inferring
   productivity from token burn rewards thrashing.
+
+---
+
+## 4. Preferences store
+
+What the user already answered, so a wrap-up does not re-ask it every session.
+Read and written **only** by `../scripts/config.sh`.
+
+**Nothing stored here authorizes an action.** A preference seeds how a gate is
+worded and pre-selected; the gate still fires. Outward-facing or irreversible
+actions — a tracker write, publishing a report — confirm every time, even when
+the stored preference says yes. That is what makes the store safe to be wrong.
+
+### Location
+
+```
+${LASTCALL_CONFIG:-~/.claude/lastcall/config.json}
+```
+
+Beside `ledger.jsonl`, `evidence/` and `statusline/`, with the same env-override
+idiom as `LASTCALL_LEDGER`, `LASTCALL_EVIDENCE_DIR`, `LASTCALL_STATUSLINE_DIR`,
+`LASTCALL_RATES` and `CLAUDE_PROJECTS`.
+
+**Not in the repository.** Fathom keeps `.fathom/config.md` in-tree because
+base-branch and state-mapping are facts about a *project* and belong to
+everyone who clones it. "Do I want a report published" is one person's taste,
+and committing it would impose it on every clone.
+
+### Keyed on git origin, not cwd
+
+```
+origin  = git config --local --get remote.origin.url
+root    = dirname of (git rev-parse --git-common-dir), absolutised
+```
+
+A cwd key fails twice on an ordinary machine, and both failures were measured
+here rather than assumed. `~/.claude/projects/` currently holds **both**
+`-Users-ryanuesato-code-agent-skill-wrapup` and
+`-Users-ryanuesato-code-agent-skill-lastcall` — one repository, renamed — and
+**both** `-Users-ryanuesato-code-ima-app` and
+`-Users-ryanuesato-code-ima-app--claude-worktrees-feat-ui-refinement` — one
+repository, plus a worktree. A cwd-keyed preference is lost by the rename and
+invisible from the worktree. This is the same pair of failures section 2 cites
+for keying evidence on session id; session id is unusable here because a
+preference has to **outlive** the session.
+
+`--git-common-dir`, **not** `--show-toplevel`. Verified against the real
+worktree at `~/code/ima-app/.claude/worktrees/`: `--show-toplevel` returns the
+worktree path, while `--git-common-dir` returns
+`/Users/ryanuesato/code/ima-app/.git`, so its dirname is the main checkout and a
+worktree session shares the main repository entry. It returns a path **relative
+to cwd** when run inside the main checkout (measured: bare `.git` at the root,
+`../../../.git` three levels down), so it must be absolutised, not used as-is.
+
+Matching order is **origin first, then `repo_root`**. On an origin hit with a
+stale `repo_root`, the entry is rewritten in place, so a rename self-heals — the
+same staleness `emit-evidence-beads.sh` already defends against on recorded cwd,
+where 5 of 26 sessions carry a path that no longer exists. A repository with no
+remote can only be keyed on its path, and a rename does lose its entry; that is
+unavoidable, and it is why origin is preferred wherever one exists.
+
+### Shape
+
+```jsonc
+{
+  "schema": "lastcall.config/1",
+
+  // A SNAPSHOT of the built-ins in force the day this file was created, written
+  // once and never rewritten. See "Adding a key" below.
+  "defaults": {
+    "memories": true, "ledger": true, "report": false, "file_issues": false
+  },
+
+  "projects": [
+    {
+      "origin":    "git@github.com:you/project.git",  // null for a repo with no remote
+      "repo_root": "/Users/you/code/project",         // rewritten on a rename
+      "configured_at":    "2026-08-23T20:53:15Z",     // when setup last RAN
+      "lastcall_version": "0.3.1",                    // null means unmeasured
+      "cc_version":       "2.1.241",                  // null means unmeasured
+      "prefs": { "report": true }                     // ONLY keys actually answered
+    }
+  ]
+}
+```
+
+`lastcall_version` and `cc_version` exist so the upgrade path can tell a config
+written by an older setup flow from a current one. Without them, version drift
+is invisible and an existing user stays frozen on whatever the setup screen
+happened to ask the first time. They are stamped by `config.sh init` — which
+means *setup ran* — and on the creation of a new entry. A plain `set` does not
+restamp them: changing one answer is not a setup run.
+
+### Resolution
+
+For every key in the closed vocabulary, in order:
+
+```
+project entry prefs  ->  stored defaults  ->  built-in
+```
+
+The built-ins **are v0.3.1 behaviour**, so a value missing at every level still
+produces an answer and a caller never has to handle "absent". `config.sh get`
+returns the resolved value plus a `sources` map naming which level supplied it.
+
+`project.configured` is true only when an entry exists — it is what the
+first-run screen turns on, **not** any preference value. A preference can equal
+its built-in and still never have been answered.
+
+### Rules
+
+- **Missing resolves as ABSENT, never as false.** The acceptance test for the
+  whole feature is that `rm`-ing this file makes lastcall behave exactly as
+  v0.3.1. Nothing may read a missing file as a "no".
+- **Unparseable is treated as absent, with a warning to stderr — never an
+  abort.** A preferences file is not worth failing a wrap-up over. Same call
+  the meter makes on an unparseable statusline capture, and `ledger.sh` on an
+  unparseable evidence file. An unrecognised `schema` is handled the same way.
+- **Reads degrade; writes refuse.** Treating a damaged file as absent and then
+  writing over it would destroy whatever it held — including a config written
+  by a *newer* lastcall, which reads here as unknown-schema. Writes stop and
+  name the path (exit 4) rather than clobber.
+- **Adding a key is additive and must not flip an existing user.** A new key is
+  absent from every existing config, so it falls through to its built-in, and
+  that built-in has to describe what lastcall already does. The stored
+  `defaults` snapshot is what makes this mechanical rather than a promise: a
+  later release changing a built-in cannot move a user who already has a
+  config, because their answer is pinned. New keys the snapshot lacks still
+  fall through to the new built-in.
+- **Unknown keys are an error, on read and on write.** A typo must not resolve
+  as "absent" and quietly take the built-in — a preference silently not
+  applying is the exact failure this store exists to remove.
+- **`config.sh` writes `$LASTCALL_CONFIG` and nothing else.** Every mutation
+  goes through one writer that takes no path argument, and the atomic-rename
+  temp lives in the config directory rather than `$TMPDIR` — same-filesystem, so
+  the rename is atomic, and the write stays inside the one directory. The
+  `allowed-tools` grant that lets a skill run this script depends on that.

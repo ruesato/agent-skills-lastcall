@@ -2,7 +2,7 @@
 name: lastcall
 description: Close out a work session — meter what it cost, summarize what actually landed and what is still open, then offer to commit, save memories, publish a report, and update the tracker. Every durable action happens only after you approve it.
 when_to_use: Use when the user is ending a session — "let's wrap up", "close this out", "I'm done for the day", "call it here" — or types /lastcall. For a mid-session checkpoint with no side effects, use the tally skill instead; tally measures, lastcall measures and then acts.
-argument-hint: "[session-id]"
+argument-hint: "[session-id] [--no-memories] [--no-ledger] [--no-file-issues] [--publish-report] [--reset-setup]"
 allowed-tools:
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/meter-session.sh *)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/meter-session.sh:*)
@@ -16,6 +16,8 @@ allowed-tools:
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/doctrine-check.sh:*)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/emit-evidence-beads.sh *)
   - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/emit-evidence-beads.sh:*)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/config.sh *)
+  - Bash(${CLAUDE_SKILL_DIR}/../lastcall-shared/scripts/config.sh:*)
 ---
 
 # lastcall
@@ -48,6 +50,91 @@ delegation, and never let one delegation's failure abort the others.
 
 ---
 
+## 0. Resolve the run plan
+
+Read this before metering — one of the overrides below changes *which session*
+step 1 measures.
+
+### What actually reaches you
+
+`$ARGUMENTS` is substituted into a skill body, so whatever the user typed after
+`/lastcall` is in front of you. Verified 2026-08-22 against the installed
+plugin tree: ten `SKILL.md` files use it, official Anthropic plugins among
+them, with usages as blunt as `Parse $ARGUMENTS`. Delivery is not in question.
+
+Parsing is. That text arrives as prose, not as `argv`. Nothing tokenizes it,
+nothing rejects an unknown flag, and a near miss produces an *interpretation*
+rather than an error. The determinism comes from the table below being written
+down and from echoing the result back before anything acts — not from the
+harness. So call it what it is when you report it: recognition, not parsing.
+Calling a flag "invalid" claims a validator that does not exist here. You either
+recognized the text or you did not, and those two failures have different fixes.
+
+Flag form and plain English are the **same mechanism**. The flag is not more
+literal than the phrase; it is a stable mnemonic, which is why it is worth
+publishing one. The `argument-hint` in the frontmatter lists the same flags for
+the slash-command picker — that is a label shown while typing, not a grammar the
+harness enforces, so keep it in step with the table below and expect nothing
+from it beyond discoverability.
+
+### The vocabulary
+
+| What you see | What it does | Where it lands |
+|---|---|---|
+| `--no-memories` · "no memories", "skip memories", "don't save memories" | The memories delegation is not offered and does not run. | Steps 5 and 6 |
+| `--no-ledger` · "don't log this", "no ledger" | No ledger row is written for this run. **The only way to suppress it.** | Step 7 |
+| `--no-file-issues` · "don't file issues" | The tracker files no new issues for open loops. Reconciling issues the evidence says already moved is unaffected. | Step 6 |
+| `--publish-report` · "publish the report", "share this", "make an artifact" | The report arrives at the gate **pre-selected**. The gate still asks. | Step 5 |
+| `--reset-setup` · "redo lastcall setup", "reconfigure lastcall" | Discard this project's configured answers and ask them again from scratch. | Before step 5 |
+| a session id (`a1b2c3d4-…`) | Meter that session instead of this one. | Step 1 |
+
+**The table is closed.** Text that is not in it is not an override — treat it as
+context for the summary, or ask. Two consequences worth stating outright,
+because both are things a helpful model would otherwise invent:
+
+- **There is no flag that skips the commit gate.** Not `--auto-commit`, not
+  `--yes`, not "just commit it". If the user asks for one, tell them it does not
+  exist. The gate in step 5 is the only check standing between a suggestion and
+  a commit, and a flag that removed it would remove the reason this skill is
+  safe to run on a dirty tree.
+- **No override adds an outward-facing action silently.** The only opt-in in the
+  table, `--publish-report`, ticks a box the user still has to submit.
+
+### Where the defaults come from
+
+Each row starts from what this project already answered during setup, and falls
+back to the built-ins described in the rest of this file when it has answered
+nothing. **No configured answers must mean exactly today's behaviour** — a fresh
+checkout, a machine that never ran setup, and a project whose entry was removed
+all behave identically. That equivalence is what makes the configuration safe to
+throw away, so never let a missing answer become a different answer.
+
+Configuration may only narrow what `lastcall` does, or pre-tick something it
+would otherwise leave blank. It can never make an outward-facing action fire
+unseen: **"configured on" means pre-selected in the gate, never that the gate is
+skipped.** Ledger and memories are local and reversible, so they may be
+defaulted outright; the report and the tracker leave this machine, so they
+are confirmed every single time regardless of what is configured; the commit
+gate takes no configuration at all.
+
+If nothing implements the setup flow in this installation yet, `--reset-setup`
+has nothing to reset. Say so plainly and continue with the built-ins rather than
+inventing a configuration screen.
+
+### Ambiguity stops — it does not guess
+
+A UUID and an English phrase rarely collide, but the near cases are real: a bare
+"no", a lone word like "report", a flag that is close to a table entry without
+being one, an id-shaped token that is actually a branch name. **Ask.** One
+`AskUserQuestion` offering the two readings costs a round trip; guessing costs
+either work the user wanted skipped or an action they never requested, and they
+find out afterwards.
+
+Fathom draws the same line during tracker setup — *"stop and ask which question
+it answered; never guess, and never treat an ambiguous or negative reply as
+approval"* — in its case, approval to file. The second clause is the one that
+binds here. An ambiguous reply is not approval.
+
 ## 1. Meter
 
 Resolve `$METER`, `$COST`, `$OPENLOOPS`, `$LEDGER_SH`, `$DOCTRINE`, and
@@ -64,10 +151,10 @@ that exists:
 "$METER" ${CLAUDE_SESSION_ID}
 ```
 
-**Always pass a session id.** Use the id above by default; when this skill was
-invoked with an argument, that argument is the session to meter instead. With no
-id at all the meter falls back to the newest transcript in the project
-directory, which is the wrong session whenever two share a directory.
+**Always pass a session id.** Use the id above by default; when step 0 resolved
+a session id out of the invocation, meter that one instead. With no id at all
+the meter falls back to the newest transcript in the project directory, which is
+the wrong session whenever two share a directory.
 
 Keep this output. You need it again in step 7, and re-running the meter mid-flow
 gives a different (larger) number that will not match what the user approved.
@@ -244,13 +331,39 @@ inferring output from token burn, which rewards thrashing.
 
 ## 5. The gate
 
+### Echo the run plan first
+
+Before you present the gate — before any delegation is even offered — print one
+line naming what this run resolved to:
+
+> Run plan: memories ON (default) · ledger ON · report OFF · tracker
+> github-issues, filing OFF (--no-file-issues)
+
+Name the *source* in parentheses for each: `(default)` for a built-in,
+`(configured)` for this project's answer, the flag itself for a per-run
+override. That parenthetical is the whole value of the line.
+
+Recognition in step 0 is a judgment call, so sooner or later it will be wrong.
+This line is what makes a wrong reading survivable: it turns a misread override
+from a silent wrong action into a visible one, sitting directly above the
+question the user is already answering, where correcting it costs a sentence.
+It is the cheapest safety in the design — without it, plain-English overrides
+are a guess with consequences.
+
+Print it on every run, including the one where nothing was overridden. A line
+that appears only when something is unusual teaches the user to read its absence
+as "nothing to see", and the all-defaults line is precisely the one that
+establishes what the defaults are.
+
+### Ask
+
 Present the summary, then ask which delegations to run. Use `AskUserQuestion`
 with `multiSelect: true`, and offer only what applies:
 
 | Delegation | Offer it when | Skip it when |
 |---|---|---|
 | Commit | `git.dirty` is true | tree is clean |
-| Memories | something durable was learned | nothing was |
+| Memories | something durable was learned | nothing was, or `--no-memories` |
 | Report | always | — |
 | Tracker | a tracker is configured (`bd`, Linear, Asana) | none is |
 
@@ -258,8 +371,18 @@ Two things not to do here: do not offer a delegation you already know has
 nothing to do, and do not manufacture work to fill a slot. An unoffered
 delegation is the correct outcome when its precondition is absent.
 
+Where the run plan says a delegation is on, offer it **pre-selected**.
+Pre-selected is not approved — the user still submits the gate, and unticking a
+box is one keystroke. The report and the tracker are never more than
+pre-selected no matter what is configured, because both leave this machine.
+Memories may instead be defaulted on and run without appearing here at all,
+which is the one place the gate genuinely shrinks; that trade is paid back in
+step 8, where every file written is named. Disclosure after the fact is the
+right shape for something a `rm` undoes.
+
 If the user declines everything, go straight to step 7. The ledger row is a
-measurement, not a delegation — it is written either way.
+measurement, not a delegation — it is written either way, unless `--no-ledger`
+was given.
 
 ## 6. Delegate
 
@@ -312,6 +435,11 @@ every future session.
 Save what was non-obvious: a constraint discovered, a preference the user
 expressed, a dead end worth not re-walking. Not what the repo already records.
 
+When this ran because it was defaulted on rather than because it was ticked at
+the gate, **name every file you wrote in step 8**. That disclosure is the entire
+justification for skipping the prompt: undoing a memory is deleting a file, so
+telling the user afterwards is a fair trade, while telling them nothing is not.
+
 ### Report
 
 Publish the step-4 summary as a shareable artifact. **If artifact publishing is
@@ -322,6 +450,13 @@ the artifact is just its nicest form. Never let a publishing failure lose it.
 
 File new issues for the open loops from step 3, and update the issues the
 evidence says moved.
+
+`--no-file-issues` removes the first half only: file nothing new, and still
+reconcile the issues the evidence says already moved. The two are different
+actions — one creates rows in someone else's backlog, the other corrects rows
+that are already there — and a user who wants the noise suppressed almost never
+wants the corrections dropped with it. Report the loops you did not file so
+they survive in the readout.
 
 **The evidence `status` is the signal for which of those an entry is. Read it
 before touching anything.** A producer that emits evidence is a skill that
@@ -378,6 +513,14 @@ The ledger is **keyed on `session_id` alone** and replaces that session's row in
 place, so re-running never appends a duplicate. Written by `lastcall` only —
 `tally` never writes.
 
+`--no-ledger` skips the `append` and nothing else: still re-meter, still run
+`emit-evidence-beads.sh`, still report the final numbers in step 8. What the
+user loses is this run in the baseline, so say so — `trend` compares against a
+median, and a session omitted from it is a session that quietly stops counting.
+There is no gate for the row precisely because this flag exists; a prompt on
+every run for a local idempotent line would train the user to click through the
+prompts that matter.
+
 Note: if the gate involved a free-text reply, the `allowed-tools` grant has
 cleared and this call may prompt for permission. That is expected, not a fault.
 
@@ -397,6 +540,12 @@ three as typical.
 State plainly what ran and what did not: "committed a1b2c3d, saved 2 memories,
 skipped the report, tracker update failed — here's the error." A wrap-up that
 overstates itself defeats its own purpose.
+
+Anything that ran on a default rather than on an answer gets **named, not
+counted**: the memory files by path, a skipped ledger row as a skipped ledger
+row. "Saved 2 memories" is a summary; the two paths are something the user can
+act on. Close the loop the run plan opened — the line at step 5 said what was
+about to happen, and this one says what did.
 
 ---
 
