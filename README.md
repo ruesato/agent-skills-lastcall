@@ -46,6 +46,36 @@ the skills — it symlinks rather than copies, so edits apply live:
 skill-directory variable, so a relative path from a `SKILL.md` cannot be
 executed there.
 
+### Kiro
+
+Kiro has no plugin marketplace, so the install is via `install.sh`.
+The three skills (`lastcall`, `tally`, `lastcall-shared`) must travel
+together — `lastcall` and `tally` resolve their scripts through
+`../lastcall-shared/scripts/`, and the `~/.lastcall/bin` fallback covers
+the case where that relative path does not resolve.
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/ruesato/agent-skills-lastcall.git
+cd agent-skills-lastcall
+
+# 2. Install the skills into ~/.kiro/skills and the scripts into ~/.lastcall/bin
+./install.sh --target kiro
+
+# 3. Verify the meter runs from the installed path
+~/.lastcall/bin/meter-session.sh
+```
+
+The skills appear in Kiro's **Agent Steering & Skills** panel and are
+invocable with `/lastcall` and `/tally`. `lastcall-shared` is a file
+container, not invocable.
+
+To uninstall:
+
+```bash
+./install.sh --target kiro --uninstall
+```
+
 ## How the metering works
 
 `skills/lastcall-shared/scripts/meter-session.sh` reads Claude Code transcripts
