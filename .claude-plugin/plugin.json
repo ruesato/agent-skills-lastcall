@@ -1,7 +1,7 @@
 {
   "name": "lastcall",
   "description": "Close out an agentic work session. Meters tokens, time, and cost from Claude Code transcripts, summarizes what actually landed and what is still open, then gates commit, memory, report, and tracker actions behind your approval. Optionally reads your 5-hour and 7-day rate-limit windows from an opt-in status line capture. Includes tally, a read-only mid-session checkpoint.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "author": {
     "name": "Ryan Uesato"
   },
