@@ -215,7 +215,11 @@ prices change.
 
 Non-obvious constraints the meter handles, each of which silently corrupts totals:
 streaming duplicates assistant entries (dedupe by response id: `requestId` on the
-first-party API, `message.id` on Bedrock); subagent turns live in
+first-party API, `message.id` on Bedrock — and because both of those are field
+*names*, `dedup.adj_dup_share` cross-checks the behaviour instead: duplicate
+chunks repeat their cumulative `usage`, so surviving duplicates appear as
+adjacent turns with identical usage, measured 0.0 on all 55 local transcripts
+and 0.11–0.57 when the key is deliberately broken); subagent turns live in
 separate `<session>/subagents/*.jsonl` files; main threads use 1h cache TTL while
 subagents use 5m, which price differently; wall-clock time is meaningless for resumed
 sessions, so active time uses gap bucketing.

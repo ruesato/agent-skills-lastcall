@@ -90,6 +90,17 @@ cmd_append() {
       cwd: $m.session.cwd, branch: $m.session.branch,
       started: $m.session.started, ended: $m.session.ended,
       active_s: $m.session.active_s,
+      # How this row was COUNTED. Without it an inflated row and a corrected
+      # one are byte-indistinguishable, which made the re-meter repair rule in
+      # contracts.md section 3 undocumentable in practice: you could state that
+      # affected rows must be re-metered but not find them. Absent on rows
+      # written before it existed, and that absence is UNKNOWN, not version 1.
+      # dedup rides along as the evidence behind it -- coverage says which
+      # response-id field was present, adj_dup_share says whether collapsing
+      # actually happened, and together they say which envelope this row was
+      # measured under. No apostrophes in this program: it is single-quoted.
+      meter_version: $m.session.meter_version,
+      dedup: $m.session.dedup,
       # Claude Code own measure of agent-busy time, beside the gap-bucketed
       # figure. Absent on rows written before it existed, so it is recorded
       # but never used in trend math — a null there means unmeasured, not zero.
@@ -181,6 +192,39 @@ cmd_trend() {
                unknown:     ($p | map(select(. == null))  | length) }
            | . + (if (.promotional > 0 and .full_rate > 0)
                   then { note: "these rows span a pricing change — a step in this trend may be a rate change, not a behavior change" }
+                  else {} end)),
+
+        # The same hazard as pricing_regimes, one layer down: a fix to how the
+        # meter COUNTS moves every later row without anything about the work
+        # changing, and reading that step as behavior is exactly the mistake.
+        # Reported the same way — counts always, note only when there is
+        # evidence the change actually bit.
+        #
+        # The note is deliberately NOT fired on a version span alone. Whether
+        # the 2026-08-24 dedup fix moved a given row depends on its envelope:
+        # measured zero drift on first-party transcripts, ~2x on Bedrock ones.
+        # Firing on every span would put a permanent false alarm on every
+        # first-party ledger, and an alarm that is always on is not read.
+        #
+        # So the trigger is an INFERENCE, and is labeled as one: unversioned
+        # rows recorded no envelope, so their exposure cannot be read off the
+        # row. What can be read is the envelope of the versioned rows on the
+        # same machine, and a machine whose recent sessions are Bedrock-served
+        # very likely produced Bedrock rows earlier too. That is evidence, not
+        # proof, and the note says so rather than asserting the rows are wrong.
+        meter_regimes:
+          (($all | map(.meter_version)) as $mv
+           | ($all | map(.dedup | select(. != null))
+                   | map(if   (.rid_coverage // 0) > 0 then "requestId"
+                         elif (.mid_coverage // 0) > 0 then "message.id"
+                         else "none" end)
+                   | unique) as $env
+           | { by_version: ($mv | group_by(.)
+                                | map({ version: .[0], rows: length })),
+               unversioned: ($mv | map(select(. == null)) | length),
+               envelopes: $env }
+           | . + (if (.unversioned > 0 and ($env | index("message.id")))
+                  then { note: "these rows span a metering change — rows with no meter_version were measured before the 2026-08-24 dedup fix, and this ledger contains Bedrock-envelope sessions, which is the envelope that fix corrected by roughly 2x; a step here may be the fix rather than a behavior change, and the older rows should be re-metered (contracts section 3). Their own envelope was not recorded, so this is inferred from the later rows, not confirmed per row" }
                   else {} end))
       }
     # A single row is not a baseline. Say so rather than reporting a "median"

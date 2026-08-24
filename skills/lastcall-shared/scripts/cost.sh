@@ -198,6 +198,21 @@ jq -s --slurpfile r "$RATES" --argjson drift "$DRIFT_PCT" '
                  and ($d.mid_coverage == null or $d.mid_coverage == 0) then
               ["no assistant entry in this transcript carries requestId, and none measurably carries message.id, so the streaming dedup fell through to uuid for all \($d.entries) of them and collapsed nothing -- if the response identifier moved to a field this version does not know, this total is inflated by the duplicate chunks"]
             else [] end )
+      # Coverage above tests whether a known FIELD was present, which cannot
+      # see an envelope that writes its response id per chunk: full coverage,
+      # nothing collapsed, every total inflated. So cross-check the property
+      # the field name stands in for. Duplicate chunks repeat the same
+      # cumulative usage, so surviving duplicates show up as adjacent turns
+      # with identical usage -- see meter-session.sh for the measurement.
+      # Threshold 0.05 sits inside a gap that is empirically empty: 0.0 on all
+      # 55 local transcripts with a working key, 0.11-0.57 with a broken one.
+      # Absent on meter JSON written before this existed, which is unmeasured
+      # and stays silent -- the coverage test above already covers those rows.
+      + ( ($m.session.dedup // null) as $d
+          | if $d == null or ($d.adj_dup_share // null) == null then []
+            elif $d.adj_dup_share >= 0.05 then
+              ["\(($d.adj_dup_share * 100) | round)% of adjacent turns carry byte-identical usage, which is what surviving streaming chunks look like -- the response id this transcript uses appears to be written per chunk rather than per response, so the dedup collapsed \($d.collapsed) and this total is inflated by whatever it missed"]
+            else [] end )
       # A tool_result whose tool_use is not in the transcript cannot be attributed
       # to a tool, so the tool_context table covers less than the session did.
       # Said out loud, because a short table otherwise reads as light tool usage.

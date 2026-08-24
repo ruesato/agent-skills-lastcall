@@ -87,7 +87,11 @@ Four things silently corrupt session totals, and the meter handles each:
 
 - Streaming writes one assistant entry per chunk, all sharing a response id —
   `requestId` on the first-party API, `message.id` on Bedrock-served
-  transcripts. Summing raw entries overcounts by roughly 90%.
+  transcripts. Summing raw entries overcounts by roughly 90%. Both of those are
+  field names, so the meter also checks the behaviour they stand in for:
+  duplicate chunks repeat their cumulative usage, and surviving duplicates show
+  up as adjacent turns with identical usage. A response id written per chunk
+  rather than per response would pass the field check and fail this one.
 - Subagent turns live in separate `<session>/subagents/*.jsonl` files, so
   metering only the main transcript omits their cost entirely.
 - Main threads use a 1h cache TTL while subagents use 5m, and the two price

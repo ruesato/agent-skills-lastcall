@@ -34,6 +34,19 @@ LOAD_WINDOW="${LASTCALL_LOAD_WINDOW:-4}"
 # wrong; it is declared as an estimate in contracts.md.
 IMAGE_TOKENS="${LASTCALL_IMAGE_TOKENS:-1600}"
 
+# How this meter COUNTED, not what it emits. Bump only when a change moves the
+# numbers a previous version would have produced for the same transcript --
+# a new field is additive and does not qualify. It rides into the ledger row so
+# a stored row can be told apart from one measured under different arithmetic,
+# which is what makes the re-meter repair path in contracts.md section 3
+# executable: without it, an inflated row and a correct one are identical on
+# disk. A row written before this existed carries no meter_version at all, and
+# that absence means "unknown", never "version 1".
+#   2 -- 2026-08-24: dedup falls back to message.id, so Bedrock-served
+#        transcripts collapse their streaming chunks instead of counting every
+#        chunk as a turn (~2x inflation on those sessions).
+METER_VERSION=2
+
 # Project dir slug: every character that is not alphanumeric or "-" becomes
 # "-". Covers "/", ".", and "+" (worktree branch names like "feat+ui-refinement").
 slug() { printf '%s' "$1" | sed 's|[^a-zA-Z0-9-]|-|g'; }
@@ -203,8 +216,11 @@ meter_file() {
     # Streaming emits one entry per chunk sharing a response id (rkey above),
     # and every chunk in a group carries the SAME cumulative usage. Collapsing
     # each group to its first entry is what stops totals from inflating by the
-    # group size. <synthetic> entries have a null requestId and all-zero usage;
-    # drop them.
+    # group size. <synthetic> entries are dropped BY MODEL NAME below, which is
+    # the only thing that excludes them: they carry no requestId but they DO
+    # carry a message.id (measured 2026-08-24: 1 of 1 locally), so since rkey
+    # gained its message.id fallback they land in the same key namespace as
+    # billed turns rather than falling through to a uuid nothing matches.
     ( map(select(.type == "assistant"
                  and .message.model != "<synthetic>"
                  and .message.usage != null))
@@ -257,6 +273,33 @@ meter_file() {
     # context deltas — so it re-sorts rather than inheriting that ordering.
     | ( $turns | sort_by(.timestamp) ) as $ordered
     | ( $ordered | length ) as $n
+
+    # ------------------------------------------------ did the dedup WORK?
+    # rid_coverage and mid_coverage say which FIELD NAME was present. That is a
+    # proxy, and it has a blind spot the field cannot see: an envelope whose
+    # response id is written per CHUNK rather than per response scores full
+    # coverage, collapses nothing, and inflates every total -- the same failure
+    # the message.id fallback just fixed, one field along.
+    #
+    # So measure the property the field name is a proxy FOR. Every chunk of one
+    # response repeats the same cumulative usage, so when the key fails to
+    # collapse them, chunks survive as separate turns and adjacent turns carry
+    # IDENTICAL usage. Real consecutive replies do not: cache_read alone moves
+    # every turn as the context grows.
+    #
+    # Measured 2026-08-24 over all 55 local transcripts (7611 assistant
+    # entries): ZERO adjacent-identical pairs with a working key, in every
+    # file. Re-keyed on uuid to simulate the break, the same corpus gives
+    # 11%-57%. The gap between 0 and 11 is the whole signal, and it does not
+    # depend on any field being called anything.
+    | ( if $n < 2 then { adj_pairs: 0, adj_dup: 0 }
+        else { adj_pairs: ($n - 1),
+               adj_dup:
+                 ( [ range(0; $n - 1) as $i
+                     | if ($ordered[$i].message.usage == $ordered[$i+1].message.usage
+                           and $ordered[$i].message.model == $ordered[$i+1].message.model)
+                       then 1 else 0 end ] | add // 0 ) }
+        end ) as $adjdup
     | ( [ range(0; $n) | $ordered[.].message.usage | resident ] ) as $resid
 
     # Thinking tokens are billed once as output, then re-read as cache on every
@@ -342,7 +385,16 @@ meter_file() {
                        service_tier: $t.message.usage.service_tier } } ]
         | from_entries ) as $ridmap
 
-    | ( [ .[] | select(.type == "assistant") as $e
+    # The <synthetic> filter here is load-bearing, not copied boilerplate. This
+    # scan walks the RAW entries, not the filtered $entries, so it is the only
+    # place that keeps synthetic entries out of the tool table. It used to get
+    # that for free: a synthetic entry has no requestId, so it keyed on its uuid
+    # and missed $ridmap. Since rkey gained the message.id fallback that is no
+    # longer true -- synthetic entries carry a message.id -- so exclude them by
+    # the same model-name test $entries uses rather than by a side effect that
+    # has already stopped holding once.
+    | ( [ .[] | select(.type == "assistant"
+                       and .message.model != "<synthetic>") as $e
           | ($ridmap[($e | rkey)] // null) as $g
           | select($g != null)
           | ($e.message.content[]? | select(.type == "tool_use"))
@@ -385,7 +437,7 @@ meter_file() {
         # evidence that work landed. summary.md points at it for the Headline;
         # this is what makes that instruction real.
         ai_title: (map(select(.type == "ai-title") | .aiTitle // empty) | last),
-        dedup: $dedup,
+        dedup: ($dedup + $adjdup),
         first_ts: ($ts | first), last_ts: ($ts | last), active_s: $active,
         agent_s:     (($td | map(.durationMs) | add // 0) / 1000),
         agent_turns: ($td | length),
@@ -491,7 +543,7 @@ meter_file() {
   true
 } | jq -s --arg sid "$SID" --argjson agents "$(agents_json)" --argjson cap "$CAP" \
        --argjson ev "$EV" --argjson rethr "$REEST_RATIO" --argjson loadw "$LOAD_WINDOW" \
-       --argjson img "$IMAGE_TOKENS" '
+       --argjson img "$IMAGE_TOKENS" --argjson mver "$METER_VERSION" '
     # Merge a list of {key: count} maps by SUMMING. Object "+" overwrites
     # duplicate keys rather than summing them, which is the trap this exists
     # to avoid — see CLAUDE.md.
@@ -517,6 +569,10 @@ meter_file() {
 
     | { session: {
         id: $sid,
+        # How this meter counted -- see METER_VERSION at the top of the script.
+        # Rides into the ledger row so a stored figure can be attributed to the
+        # arithmetic that produced it.
+        meter_version: $mver,
         # The LATEST main lane wins, not the first. A split session carries the
         # pre-rename path in its earlier part, and reporting that as the session
         # cwd points every consumer at a directory that no longer exists.
@@ -548,15 +604,29 @@ meter_file() {
         # with mid_coverage null or 0 into a caveat: it means the grouping
         # silently fell through to uuid for the whole file. rid 0 with mid
         # above 0 is the Bedrock envelope, handled by the fallback.
-        dedup: ( (map(.dedup) | { entries: (map(.entries) | add // 0),
-                                  turns:   (map(.turns)   | add // 0),
-                                  rid:     (map(.rid)     | add // 0),
-                                  mid:     (map(.mid)     | add // 0) })
+        #
+        # adj_dup_share is the name-independent cross-check described where it
+        # is computed: the share of adjacent turn pairs carrying identical
+        # usage, which is what a FAILED collapse looks like regardless of what
+        # the response id is called. Coverage answers "was the field there",
+        # this answers "did collapsing happen". Both are reported because they
+        # fail in different directions.
+        dedup: ( (map(.dedup) | { entries:   (map(.entries)   | add // 0),
+                                  turns:     (map(.turns)     | add // 0),
+                                  rid:       (map(.rid)       | add // 0),
+                                  mid:       (map(.mid)       | add // 0),
+                                  adj_pairs: (map(.adj_pairs) | add // 0),
+                                  adj_dup:   (map(.adj_dup)   | add // 0) })
                  | . + { collapsed: (.entries - .turns),
                          rid_coverage: (if .entries == 0 then null
                                         else ((.rid / .entries * 1000 | round) / 1000) end),
                          mid_coverage: (if .entries == 0 then null
-                                        else ((.mid / .entries * 1000 | round) / 1000) end) } ),
+                                        else ((.mid / .entries * 1000 | round) / 1000) end),
+                         # null, not 0, when there was no pair to compare:
+                         # a one-turn session has not shown the dedup working,
+                         # it has given it nothing to do.
+                         adj_dup_share: (if .adj_pairs == 0 then null
+                                         else ((.adj_dup / .adj_pairs * 1000 | round) / 1000) end) } ),
         # Reasoning effort, rolled up so it can be stated without arithmetic
         # over the token rows. Claude Code has recorded it per turn all along
         # and nothing has ever reported it. Measured locally 2026-08-22: high on

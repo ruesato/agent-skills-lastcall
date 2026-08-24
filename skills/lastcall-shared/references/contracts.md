@@ -254,7 +254,17 @@ Each of these silently corrupts totals if a reimplementation drops it:
    `requestId`: present on 5629 of 5630 assistant entries over 27 local
    transcripts, most common group size *three* (measured 2026-08-22).
    Bedrock-served transcripts carry `message.id` instead, with `requestId`
-   absent: 0 of 6148 entries over 27 transcripts (measured 2026-08-23).
+   absent: 0 of 6148 entries over 27 transcripts — **externally reported
+   2026-08-23, not reproduced here.** No Bedrock transcript exists on this
+   machine, so every Bedrock figure in this invariant comes from that report
+   and could not be re-derived locally; the `verify.sh` fixture *constructs*
+   the shape the report describes rather than sampling a real file, which
+   confirms the code handles that shape but cannot confirm the shape. The
+   inference is well-supported — one message id per response is how the
+   Messages API is specified, and on the local first-party corpus `requestId`
+   and `message.id` partition identically (3657 groups each, zero
+   cross-spanning, 7611 entries, measured 2026-08-24) — but it is an inference,
+   and is marked as one so a later reader does not spend it as a measurement.
    **This guard is load-bearing, not vestigial.** A 2026-08-22 external review
    of the Bedrock corpus sampled `requestId` as absent from 100% of turns,
    concluded the guard was inert, and proposed changing the grouping key — on
@@ -272,11 +282,35 @@ Each of these silently corrupts totals if a reimplementation drops it:
    0) still warns: those rows are exactly the ones the rename already
    inflated. Do not delete the guard on the strength of a session that
    happens to need no collapsing.
+
+   Coverage answers *was the field there*, which is a proxy with a blind spot
+   it structurally cannot see: an envelope that writes its response id **per
+   chunk** scores full coverage, collapses nothing, and inflates every total —
+   the identical failure one field along. So `session.dedup` also carries
+   `adj_pairs`, `adj_dup`, and `adj_dup_share`, which answer *did collapsing
+   happen* without reference to any field name. Duplicate chunks repeat the
+   same cumulative `usage`, so surviving duplicates appear as adjacent turns
+   with byte-identical usage; genuine consecutive replies never match, because
+   `cache_read` alone moves every turn. Measured 2026-08-24 across all 55 local
+   transcripts: `adj_dup_share` is **0.0 in every file**, and re-keying the
+   same corpus on `uuid` to simulate the break gives **0.11–0.57**. `cost.sh`
+   raises a caveat at `>= 0.05`, a threshold sitting inside a gap that is
+   empirically empty. `adj_dup_share` is null when there was no adjacent pair
+   to compare, which is *unmeasured* — a one-turn session has not demonstrated
+   the dedup working, it has given it nothing to do.
 2. **Subagents included.** Their turns live in
    `<project>/<session-id>/subagents/*.jsonl`, not in the main transcript.
    Metering only the main file silently omits all subagent cost.
-3. **`<synthetic>` entries excluded.** They carry a null `requestId` and all-zero
-   usage.
+3. **`<synthetic>` entries excluded, by model name.** They carry a null
+   `requestId` and all-zero usage, but the *name* is the only sound test.
+   Exclusion used to fall out of the key chain for free — no `requestId` meant
+   the entry keyed on its `uuid` and matched nothing — and that stopped being
+   true when `rkey` gained the `message.id` fallback, because synthetic
+   entries do carry a `message.id` (1 of 1 locally, measured 2026-08-24). Both
+   the token pipeline and the tool-context scan therefore test
+   `.message.model != "<synthetic>"` explicitly. Do not reintroduce reliance on
+   a missing identifier: it is a side effect of the current key chain, not a
+   property of synthetic entries.
 4. **Active time, not wall clock.** A resumed session can span days.
 5. **Cache write TTLs kept separate.** `cache_w_5m` and `cache_w_1h` bill at
    different multipliers.
@@ -510,6 +544,14 @@ Global across projects, with `cwd` as a filterable field. Written by
   "started":    "...", "ended": "...", "active_s": 7754,
   "agent_s":    4177.8,                         // null on rows written before it existed
 
+  // How this row was COUNTED, not what it holds. Absent means UNKNOWN, never
+  // version 1 — see the re-metering rule below for why the distinction is the
+  // whole point of the field.
+  "meter_version": 2,
+  "dedup": { /* contract 1 `session.dedup`, verbatim: the evidence behind
+                meter_version — which response-id field this session carried,
+                and whether collapsing actually happened */ },
+
   "cost": {
     "usd": 4.18,
     "by_model": [ { "model": "claude-opus-5", "lane": "main", "usd": 3.91 } ],
@@ -545,6 +587,21 @@ Global across projects, with `cwd` as a filterable field. Written by
   wrong, because `metered_at` changes on every run, so every re-run would
    append. `lastcall` meters twice within a single run (see delegation), so
    the row must be replaceable in place.
+- **`meter_version` identifies rows a re-metering repair must target.** The
+  rule below says affected rows are re-metered rather than scaled; this is the
+  field that makes finding them possible. It was added 2026-08-24 after the
+  rule was written without it, which left the repair path stated but not
+  executable — an inflated row and a corrected one were byte-identical on
+  disk. Bump it only when a change moves the numbers a previous version would
+  have produced for the same transcript; a new field is additive and does not
+  qualify. `ledger.sh trend` reports `meter_regimes` from it, in the same shape
+  as `pricing_regimes` and for the same reason: a step in the trend that comes
+  from a measurement fix must not be read as a change in behavior. That note
+  fires only when the ledger also contains a Bedrock-envelope session, because
+  the 2026-08-24 fix moved first-party rows by zero and a note that fires on
+  every ledger forever would not be read. Unversioned rows recorded no envelope
+  of their own, so the trigger is an inference from the machine's later rows
+  and the note says so — it does not assert those rows are wrong.
 - **Re-metering is the repair path, and provenance is caller-supplied.** When
   a metering bug is fixed, affected rows are re-metered, never scaled: the
   inflation factor varies per field and per session (1.36x–3.74x across

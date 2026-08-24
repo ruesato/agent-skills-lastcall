@@ -634,7 +634,91 @@ if printf '%s' "$unout" | jq 'del(.session.dedup.mid_coverage)' \
      | "$S/cost.sh" 2>/dev/null | jq -e \
      '[.caveats[] | select(test("fell through to uuid"))] | length == 1' >/dev/null 2>&1
 then ok; else bad "cost stopped warning on legacy meter JSON with no mid_coverage"; fi
+# The blind spot the coverage pair structurally cannot see: an envelope that
+# writes its response id PER CHUNK. mid_coverage is a full 1, so the
+# missing-identifier caveat is correctly silent, nothing collapses, and every
+# total is inflated — the same failure one field along. The name-independent
+# check catches it: duplicate chunks repeat their cumulative usage, so
+# surviving duplicates show up as adjacent turns with identical usage.
+mkdir -p "$DROOT/-fixture-perchunk"
+pchunk() {  # pchunk <message.id> <ts> <in> <out> <cache-read>
+  jq -cn --arg m "$1" --arg t "$2" --argjson i "$3" --argjson o "$4" --argjson c "$5" \
+    '{type: "assistant", timestamp: $t, cwd: "/", gitBranch: "main",
+      message: {id: $m, model: "claude-opus-5", content: [{type: "text", text: "hi"}],
+                usage: {input_tokens: $i, output_tokens: $o,
+                        cache_read_input_tokens: $c}}}'
+}
+{ pchunk msg_c1 "2026-08-19T09:00:01.000Z" 5 200 100
+  pchunk msg_c2 "2026-08-19T09:00:02.000Z" 5 200 100
+  pchunk msg_c3 "2026-08-19T09:00:03.000Z" 5 200 100
+  pchunk msg_c4 "2026-08-19T09:00:04.000Z" 7 300 400
+  pchunk msg_c5 "2026-08-19T09:00:05.000Z" 7 300 400
+  pchunk msg_c6 "2026-08-19T09:00:06.000Z" 7 300 400
+} > "$DROOT/-fixture-perchunk/fixture-perchunk.jsonl"
+pcout="$(CLAUDE_PROJECTS="$DROOT" "$S/meter-session.sh" fixture-perchunk 2>/dev/null)"
+# 4 of 5 adjacent pairs repeat their usage; only the 3->4 boundary differs.
+if printf '%s' "$pcout" | jq -e '.session.dedup.mid_coverage == 1
+      and .session.dedup.collapsed == 0
+      and .session.dedup.adj_pairs == 5
+      and .session.dedup.adj_dup == 4
+      and .session.dedup.adj_dup_share == 0.8' >/dev/null 2>&1
+then ok; else bad "meter did not measure surviving duplicates on a per-chunk response id"; fi
+if printf '%s' "$pcout" | "$S/cost.sh" 2>/dev/null | jq -e \
+     '[.caveats[] | select(test("byte-identical usage"))] | length == 1' >/dev/null 2>&1
+then ok; else bad "cost stayed silent on a per-chunk response id (full coverage, nothing collapsed)"; fi
+# The healthy fixtures must NOT trip it — a false positive here would fire on
+# every session. Measured 0.0 across all 55 local transcripts.
+if printf '%s' "$bkout" | jq -e '.session.dedup.adj_dup == 0' >/dev/null 2>&1 \
+   && printf '%s' "$bkout" | "$S/cost.sh" 2>/dev/null | jq -e \
+     '[.caveats[] | select(test("byte-identical usage"))] | length == 0' >/dev/null 2>&1
+then ok; else bad "the duplicate cross-check fired on a correctly collapsed transcript"; fi
+# Absent on meter JSON written before the check existed: unmeasured, silent.
+if printf '%s' "$pcout" | jq 'del(.session.dedup.adj_dup_share)' \
+     | "$S/cost.sh" 2>/dev/null | jq -e \
+     '[.caveats[] | select(test("byte-identical usage"))] | length == 0' >/dev/null 2>&1
+then ok; else bad "cost warned about adjacent duplicates on meter JSON that never measured them"; fi
 rm -rf "$DROOT"
+
+# 6. Ledger provenance: a row records HOW it was counted, so a re-metering
+# repair can find the rows it applies to and trend can tell a measurement fix
+# apart from a change in behavior. Before this, an inflated row and a corrected
+# one were byte-identical on disk.
+LROOT="$(mktemp -d "$TMP/lastcall-prov.XXXXXX")"
+LJ="$LROOT/ledger.jsonl"
+mrow() {  # mrow <session-id> <meter_version-json> <rid-cov-json> <mid-cov-json>
+  jq -cn --arg s "$1" --argjson v "$2" --argjson r "$3" --argjson d "$4" \
+    '{schema: "lastcall.ledger/1", session_id: $s, metered_at: "2026-08-19T09:00:00Z",
+      cwd: "/tmp/p", branch: "main", started: "2026-08-19T09:00:00Z",
+      ended: "2026-08-19T10:00:00Z", active_s: 3600, agent_s: 1800,
+      cost: {usd: 1, by_model: [], pricing_source: "t", promo_applied: false,
+             promo_models: [], by_skill: [], caveats: []},
+      tokens: [], work: {tool_calls: 1, files_changed: 1, commits: []},
+      friction: {tool_errors: 0, interrupts: 0, denials: 0}, evidence: null}
+     | if $v == null then . else . + {meter_version: $v} end
+     | if $r == null then . else . + {dedup: {rid_coverage: $r, mid_coverage: $d}} end'
+}
+# Legacy rows plus a first-party row: versions span, but the fix moved
+# first-party totals by zero, so a note here would be a permanent false alarm.
+{ mrow s1 null null null; mrow s2 null null null; mrow s3 2 1 1; } > "$LJ"
+if LASTCALL_LEDGER="$LJ" "$S/ledger.sh" trend | jq -e '
+      .meter_regimes.unversioned == 2
+      and (.meter_regimes.envelopes == ["requestId"])
+      and (.meter_regimes.note == null)' >/dev/null 2>&1
+then ok; else bad "trend flagged a metering span on a ledger the fix could not have moved"; fi
+# Same span, but a Bedrock-envelope row present: the legacy rows are the ones
+# that fix corrected ~2x, so say so.
+{ mrow s1 null null null; mrow s2 null null null; mrow s3 2 0 1; } > "$LJ"
+if LASTCALL_LEDGER="$LJ" "$S/ledger.sh" trend | jq -e '
+      (.meter_regimes.envelopes == ["message.id"])
+      and (.meter_regimes.note | test("re-metered"))
+      and (.meter_regimes.note | test("inferred"))' >/dev/null 2>&1
+then ok; else bad "trend stayed silent on a metering span with Bedrock-envelope rows"; fi
+# A ledger written entirely by one meter version has no span to report.
+{ mrow s1 2 1 1; mrow s2 2 1 1; } > "$LJ"
+if LASTCALL_LEDGER="$LJ" "$S/ledger.sh" trend | jq -e '
+      .meter_regimes.unversioned == 0 and (.meter_regimes.note == null)' >/dev/null 2>&1
+then ok; else bad "trend reported a metering span on a single-version ledger"; fi
+rm -rf "$LROOT"
 
 say "  fixtures checked"
 
