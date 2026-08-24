@@ -8,3 +8,6 @@
 # Local notes/docs, not tracked
 docs/
 reference/
+
+# macOS
+.DS_Store
