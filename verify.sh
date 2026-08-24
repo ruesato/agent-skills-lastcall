@@ -549,6 +549,93 @@ if printf '%s' '{"session_id":"../../escaped"}' \
 then ok; else bad "capture-statusline.sh let a session id escape the store"; fi
 rm -rf "$CAPD"
 
+# 5. The streaming dedup key chain: requestId first, then message.id, then
+# uuid. Bedrock-served transcripts carry message.id only — requestId is absent
+# on every entry — and a key that misses both falls through to uuid, which is
+# unique per entry, so nothing collapses and totals inflate by the duplicate
+# chunks (the external report behind this change measured ~2x across an 11-row
+# ledger). Three shapes pinned: the Bedrock envelope collapses and stays
+# silent, an unknown format with neither id collapses nothing and warns, and
+# legacy meter JSON with no mid_coverage still warns.
+DROOT="$(mktemp -d "$TMP/lastcall-dedup.XXXXXX")"
+mkdir -p "$DROOT/-fixture-bedrock" "$DROOT/-fixture-unknown"
+bchunk() {  # bchunk <message.id> <ts> <out-tokens> <content-json>
+  # Content is a required argument: a JSON default inside ${4:-...} misparses
+  # on its own braces, appending literal tail fragments to the expansion.
+  jq -cn --arg m "$1" --arg t "$2" --argjson o "$3" --argjson c "$4" \
+    '{type: "assistant", timestamp: $t, cwd: "/", gitBranch: "main",
+      message: {id: $m, model: "claude-opus-5", content: $c,
+                usage: {input_tokens: 5, output_tokens: $o,
+                        cache_read_input_tokens: 100}}}'
+}
+{ bchunk msg_b1 "2026-08-19T09:00:00.000Z" 206 '[{"type":"text","text":"hi"}]'
+  bchunk msg_b1 "2026-08-19T09:00:01.000Z" 206 \
+    '[{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"true"}}]'
+  bchunk msg_b1 "2026-08-19T09:00:02.000Z" 206 \
+    '[{"type":"tool_use","id":"tu_2","name":"Bash","input":{"command":"true"}}]'
+  jq -cn '{type: "user", timestamp: "2026-08-19T09:00:03.000Z",
+      cwd: "/", gitBranch: "main",
+      message: {content: [{type: "tool_result", tool_use_id: "tu_1", content: "okokokok"},
+                          {type: "tool_result", tool_use_id: "tu_2", content: "okokokok"}]}}'
+  bchunk msg_b2 "2026-08-19T09:00:04.000Z" 100 '[{"type":"text","text":"hi"}]'
+} > "$DROOT/-fixture-bedrock/fixture-bedrock.jsonl"
+bkout="$(CLAUDE_PROJECTS="$DROOT" "$S/meter-session.sh" fixture-bedrock 2>/dev/null)"
+# The Bedrock envelope collapses on message.id: 4 entries become 2 turns and
+# usage sums once per reply (306 output, not the 718 the raw lines would give).
+# The coverage pair says which envelope carried it: rid 0, mid 1.
+if printf '%s' "$bkout" | jq -e '.session.dedup.entries == 4
+      and .session.dedup.turns == 2
+      and .session.dedup.collapsed == 2
+      and .session.dedup.rid_coverage == 0
+      and .session.dedup.mid_coverage == 1
+      and ([.tokens[].output] | add) == 306' >/dev/null 2>&1
+then ok; else bad "meter did not collapse a Bedrock-envelope transcript on message.id"; fi
+# The tool-context join must key on the SAME chain as the dedup: both tool_use
+# blocks live in non-first chunks of msg_b1, so a join still keyed on
+# requestId or uuid alone would drop them here.
+if printf '%s' "$bkout" | jq -e '([.work.tool_context[]
+      | select(.tool == "Bash") | .calls] | add) == 2
+      and .work.tool_context_coverage.matched == 2' >/dev/null 2>&1
+then ok; else bad "tool_context join dropped non-first chunks of a collapsed group"; fi
+# A handled message.id envelope must NOT raise the missing-identifier caveat —
+# it would fire on every Bedrock session forever, on a correct total.
+if printf '%s' "$bkout" | "$S/cost.sh" 2>/dev/null | jq -e \
+     '[.caveats[] | select(test("fell through to uuid"))] | length == 0' >/dev/null 2>&1
+then ok; else bad "cost warned about a handled message.id envelope"; fi
+
+# Neither identifier present (uuid only): nothing collapses, totals equal the
+# raw sums — the honest behavior for a format this version does not know.
+nchunk() {  # nchunk <uuid> <ts>
+  jq -cn --arg u "$1" --arg t "$2" \
+    '{type: "assistant", uuid: $u, timestamp: $t, cwd: "/", gitBranch: "main",
+      message: {model: "claude-opus-5", content: [{type: "text", text: "hi"}],
+                usage: {input_tokens: 5, output_tokens: 50,
+                        cache_read_input_tokens: 0}}}'
+}
+{ nchunk u1 "2026-08-19T09:00:00.000Z"
+  nchunk u2 "2026-08-19T09:00:01.000Z"
+  nchunk u3 "2026-08-19T09:00:02.000Z"
+} > "$DROOT/-fixture-unknown/fixture-unknown.jsonl"
+unout="$(CLAUDE_PROJECTS="$DROOT" "$S/meter-session.sh" fixture-unknown 2>/dev/null)"
+if printf '%s' "$unout" | jq -e '.session.dedup.turns == 3
+      and .session.dedup.collapsed == 0
+      and .session.dedup.rid_coverage == 0
+      and .session.dedup.mid_coverage == 0
+      and ([.tokens[].output] | add) == 150' >/dev/null 2>&1
+then ok; else bad "meter collapsed or miscounted a transcript with no known identifier"; fi
+# ...and the caveat FIRES, because this is exactly the next-format-moved shape.
+if printf '%s' "$unout" | "$S/cost.sh" 2>/dev/null | jq -e \
+     '[.caveats[] | select(test("fell through to uuid"))] | length == 1' >/dev/null 2>&1
+then ok; else bad "cost stayed silent when neither identifier was found"; fi
+# Legacy meter JSON has rid_coverage but no mid_coverage. Pre-fix Bedrock rows
+# are precisely the ones already inflated, so stripping the key must not
+# silence the warning.
+if printf '%s' "$unout" | jq 'del(.session.dedup.mid_coverage)' \
+     | "$S/cost.sh" 2>/dev/null | jq -e \
+     '[.caveats[] | select(test("fell through to uuid"))] | length == 1' >/dev/null 2>&1
+then ok; else bad "cost stopped warning on legacy meter JSON with no mid_coverage"; fi
+rm -rf "$DROOT"
+
 say "  fixtures checked"
 
 # ---------------------------------------------------------------- result

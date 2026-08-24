@@ -23,7 +23,7 @@ def turns(f):
         except: continue
         m=d.get("message") or {}
         if d.get("type")!="assistant" or m.get("model")=="<synthetic>" or not m.get("usage"): continue
-        r=d.get("requestId") or d.get("uuid")
+        r=d.get("requestId") or m.get("id") or d.get("uuid")
         if r in seen: continue
         seen.add(r); T.append(d)
     return T

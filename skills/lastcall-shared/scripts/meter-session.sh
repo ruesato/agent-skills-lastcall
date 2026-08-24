@@ -191,27 +191,44 @@ meter_file() {
               else (tojson | length / 4 | floor) end) | add // 0 )
       else (tojson | length / 4 | floor) end;
 
-    # Streaming emits one entry per chunk sharing a requestId, and every chunk
-    # in a group carries the SAME cumulative usage. Collapsing each group to its
-    # first entry is what stops totals from inflating by the group size.
-    # <synthetic> entries have a null requestId and all-zero usage; drop them.
+    # The response identifier under whichever name this transcript carries it.
+    # First-party API writes requestId; Bedrock-served transcripts write
+    # message.id instead, with requestId absent on every entry; uuid is the
+    # always-present line id and the last resort. The dedup below and the
+    # tool-context join further down MUST group on the same expression: if the
+    # join keys differ from the dedup keys, every chunk that is not first in
+    # its group misses the lookup and tool_context silently goes thin.
+    def rkey: .requestId // .message.id // .uuid;
+
+    # Streaming emits one entry per chunk sharing a response id (rkey above),
+    # and every chunk in a group carries the SAME cumulative usage. Collapsing
+    # each group to its first entry is what stops totals from inflating by the
+    # group size. <synthetic> entries have a null requestId and all-zero usage;
+    # drop them.
     ( map(select(.type == "assistant"
                  and .message.model != "<synthetic>"
                  and .message.usage != null))
     ) as $entries
-    | ( $entries | group_by(.requestId // .uuid) | map(.[0]) ) as $turns
+    | ( $entries | group_by(rkey) | map(.[0]) ) as $turns
 
     # This guard is load-bearing, and its coverage is MEASURED rather than
-    # assumed. Measured 2026-08-22 over 27 local transcripts: requestId present
-    # on 5629 of 5630 assistant entries, and the most common group size is
-    # THREE, not two. A review that sampled this wrongly concluded the guard was
-    # inert and proposed changing the key; doing so would have inflated every
-    # total here by ~2.3x. So report what the key actually did: rid_coverage 0
-    # means every entry fell through to uuid, which is the signal the transcript
-    # format moved, not proof that nothing needed collapsing.
+    # assumed. The response id goes by different names per provider. On
+    # first-party API transcripts requestId is present: 5629 of 5630 entries
+    # over 27 local transcripts, most common group size THREE (measured
+    # 2026-08-22). On Bedrock-served transcripts requestId is absent (0 of
+    # 6148) and message.id is the identifier, which is why rkey falls through
+    # to it (measured 2026-08-23 by the external review this caveat caught).
+    # That review read requestId 0 as proof the guard was inert; on the
+    # first-party corpus changing the key would have inflated every total by
+    # ~2.3x, and on Bedrock the missing fallback measurably did inflate them,
+    # ~2x across an 11-row ledger. So report what the key actually did, per
+    # envelope: rid_coverage 0 with mid_coverage above 0 is the Bedrock
+    # envelope handled; BOTH 0 is the signal the format moved again, not proof
+    # that nothing needed collapsing.
     | ( { entries: ($entries | length),
           turns:   ($turns   | length),
-          rid:     ($entries | map(select(.requestId != null)) | length) } ) as $dedup
+          rid:     ($entries | map(select(.requestId != null)) | length),
+          mid:     ($entries | map(select(.message.id != null)) | length) } ) as $dedup
 
     # Timestamps carry milliseconds, which fromdateiso8601 rejects.
     | ( map(.timestamp | select(. != null)
@@ -235,8 +252,8 @@ meter_file() {
             | select(.type == "tool_use")) ) as $tools
 
     # ------------------------------------------------ ordered turn timeline
-    # group_by sorts on its KEY, so $turns above comes out in requestId order,
-    # not in time order. Everything below is positional — carry, idle gaps,
+    # group_by sorts on its KEY, so $turns above comes out in response-id
+    # order, not in time order. Everything below is positional — carry, idle gaps,
     # context deltas — so it re-sorts rather than inheriting that ordering.
     | ( $turns | sort_by(.timestamp) ) as $ordered
     | ( $ordered | length ) as $n
@@ -312,21 +329,21 @@ meter_file() {
     # so a payload can be priced with the same rate table as everything else.
     #
     # Built in two steps, and the reason is the dedup. Streaming splits one turn
-    # across chunks that share a requestId, and the deduped $turns keeps the
+    # across chunks that share a response id, and the deduped $turns keeps the
     # FIRST chunk — which usually does not hold the tool_use block. Reading the
     # map straight off $ordered matched 52 of 318 tool_results on
     # 0fd5463b-bdc7-4b5a-900d-2dd9093f1bcb and read as thin tool usage rather
     # than as a broken join. So index the turns by request key, then scan every
     # assistant entry for tool_use and look its turn up.
     | ( [ range(0; $n) as $i | $ordered[$i] as $t
-          | { key: ($t.requestId // $t.uuid),
+          | { key: ($t | rkey),
               value: { idx: $i, model: $t.message.model,
                        speed: $t.message.usage.speed,
                        service_tier: $t.message.usage.service_tier } } ]
         | from_entries ) as $ridmap
 
     | ( [ .[] | select(.type == "assistant") as $e
-          | ($ridmap[($e.requestId // $e.uuid)] // null) as $g
+          | ($ridmap[($e | rkey)] // null) as $g
           | select($g != null)
           | ($e.message.content[]? | select(.type == "tool_use"))
           | { key: (.id // ""), value: ($g + { name: .name }) } ]
@@ -525,16 +542,21 @@ meter_file() {
         # than untitled. Latest wins: a split session carries the earlier one.
         ai_title: (map(select(.lane=="main") | .ai_title | select(.)) | last),
         # What the streaming dedup actually did, summed over every lane and
-        # every split part. collapsed is how many duplicate chunks were removed;
-        # rid_coverage is the share of entries that carried the key it groups
-        # on. Downstream turns rid_coverage == 0 into a caveat: it means the
-        # grouping silently fell through to uuid for the whole file.
+        # every split part. collapsed is how many duplicate chunks were
+        # removed; rid_coverage and mid_coverage are the shares of entries
+        # carrying each response-id field. Downstream turns rid_coverage == 0
+        # with mid_coverage null or 0 into a caveat: it means the grouping
+        # silently fell through to uuid for the whole file. rid 0 with mid
+        # above 0 is the Bedrock envelope, handled by the fallback.
         dedup: ( (map(.dedup) | { entries: (map(.entries) | add // 0),
                                   turns:   (map(.turns)   | add // 0),
-                                  rid:     (map(.rid)     | add // 0) })
+                                  rid:     (map(.rid)     | add // 0),
+                                  mid:     (map(.mid)     | add // 0) })
                  | . + { collapsed: (.entries - .turns),
                          rid_coverage: (if .entries == 0 then null
-                                        else ((.rid / .entries * 1000 | round) / 1000) end) } ),
+                                        else ((.rid / .entries * 1000 | round) / 1000) end),
+                         mid_coverage: (if .entries == 0 then null
+                                        else ((.mid / .entries * 1000 | round) / 1000) end) } ),
         # Reasoning effort, rolled up so it can be stated without arithmetic
         # over the token rows. Claude Code has recorded it per turn all along
         # and nothing has ever reported it. Measured locally 2026-08-22: high on

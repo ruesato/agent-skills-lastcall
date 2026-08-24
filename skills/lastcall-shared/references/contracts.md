@@ -246,21 +246,32 @@ configures it — see the README for why.
 
 Each of these silently corrupts totals if a reimplementation drops it:
 
-1. **Deduped by `requestId`.** Streaming writes one entry per chunk sharing a
-   `requestId`, and every chunk in a group repeats the same cumulative `usage`,
-   so the group collapses to its first entry. Summing raw entries overcounts by
-   roughly 90%. **This guard is load-bearing, not vestigial.** Measured
-   2026-08-22 over 27 local transcripts: `requestId` present on 5629 of 5630
-   assistant entries, ~50% of entries duplicates, and the most common group size
-   is *three*, not two. A 2026-08-22 external review sampled this as absent from
-   100% of turns, concluded the guard was inert, and proposed changing the
-   grouping key; on this corpus that would have inflated every total by ~2.3x.
-   So the meter now MEASURES what the key did rather than assuming it, and
-   reports it as `session.dedup` — `entries`, `turns`, `collapsed`, and
-   `rid_coverage`. A `rid_coverage` of 0 means the fallback to `uuid` carried
-   the whole file and nothing was collapsed; `cost.sh` raises a caveat, because
-   that is the signal the transcript format moved. Do not delete the guard on
-   the strength of a session that happens to need no collapsing.
+1. **Deduped by response id: `requestId`, then `message.id`, then `uuid`.**
+   Streaming writes one entry per chunk sharing a response id, and every chunk
+   in a group repeats the same cumulative `usage`, so the group collapses to
+   its first entry. Summing raw entries overcounts by roughly 90%. The id goes
+   by different names per provider. First-party API transcripts carry
+   `requestId`: present on 5629 of 5630 assistant entries over 27 local
+   transcripts, most common group size *three* (measured 2026-08-22).
+   Bedrock-served transcripts carry `message.id` instead, with `requestId`
+   absent: 0 of 6148 entries over 27 transcripts (measured 2026-08-23).
+   **This guard is load-bearing, not vestigial.** A 2026-08-22 external review
+   of the Bedrock corpus sampled `requestId` as absent from 100% of turns,
+   concluded the guard was inert, and proposed changing the grouping key — on
+   the first-party corpus that change would have inflated every total by
+   ~2.3x, and on Bedrock the missing fallback measurably *did* inflate them:
+   ~2x across an 11-row ledger, with per-field factors of 1.36x–3.74x, so
+   stored rows cannot be repaired by scaling, only re-metered (contract 3).
+   The meter therefore MEASURES what the key did rather than assuming it,
+   reported as `session.dedup` — `entries`, `turns`, `collapsed`,
+   `rid_coverage`, `mid_coverage`. `rid_coverage` 0 with `mid_coverage` above
+   0 is the Bedrock envelope handled by the fallback; *both* 0 means the
+   fallback to `uuid` carried the whole file, nothing was collapsed, and
+   `cost.sh` raises a caveat, because that is the signal the transcript format
+   moved again. Meter JSON saved before `mid_coverage` existed (absent, not
+   0) still warns: those rows are exactly the ones the rename already
+   inflated. Do not delete the guard on the strength of a session that
+   happens to need no collapsing.
 2. **Subagents included.** Their turns live in
    `<project>/<session-id>/subagents/*.jsonl`, not in the main transcript.
    Metering only the main file silently omits all subagent cost.
@@ -532,8 +543,19 @@ Global across projects, with `cwd` as a filterable field. Written by
   duplicates ever appear — it is deliberately **not** part of the key. An
   earlier draft of this contract keyed on `(session_id, metered_at)`; that is
   wrong, because `metered_at` changes on every run, so every re-run would
-  append. `lastcall` meters twice within a single run (see delegation), so
-  the row must be replaceable in place.
+   append. `lastcall` meters twice within a single run (see delegation), so
+   the row must be replaceable in place.
+- **Re-metering is the repair path, and provenance is caller-supplied.** When
+  a metering bug is fixed, affected rows are re-metered, never scaled: the
+  inflation factor varies per field and per session (1.36x–3.74x across
+  fields in the 2026-08-23 Bedrock report, invariant 1), so no single factor
+  repairs a stored row. `append` replaces the row wholesale and takes
+  `work.commits` from argv, so extract `.work.commits` from each affected row
+  BEFORE re-metering and re-pass those SHAs, or the repair silently strips
+  the session-to-commit grounding. Evidence is safer: it survives if the
+  drop-box files persist (`evidence_for` re-reads them at append), and
+  re-derives through `emit-evidence-beads.sh` even if they do not, because
+  its window filter reads the session's recorded `started`/`ended`.
 - **`pricing_source` is required.** A cost figure whose rate table is unknown
   cannot be compared against other rows, and rates change over time.
 - **`promo_applied` records the pricing regime, and absent means unknown.** A

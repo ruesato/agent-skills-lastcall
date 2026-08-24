@@ -181,17 +181,22 @@ jq -s --slurpfile r "$RATES" --argjson drift "$DRIFT_PCT" '
           | if . > 0 then
               ["\(.) web search calls carry per-request spend that no token bucket expresses — NOT in this total"]
             else [] end )
-      # The streaming dedup groups on requestId and falls back to uuid, which
-      # is unique per entry. Coverage of 0 means the fallback carried the whole
-      # file, so nothing was ever collapsed -- either the transcript genuinely
-      # has one entry per turn, or the field was renamed and totals are now
-      # inflated by the duplicate chunks. This cannot tell which, so it says so
-      # rather than trusting the number. Explicit null test, not //: coverage
-      # of 0 is exactly the value being looked for and // would discard it.
+      # The streaming dedup groups on the first of requestId / message.id
+      # present, falling back to uuid, which is unique per entry. rid 0 with a
+      # positive mid_coverage is the Bedrock envelope handled by the fallback:
+      # silent. rid 0 with mid 0 means NEITHER identifier was found and nothing
+      # was collapsed -- either the transcript genuinely has one entry per
+      # turn, or the identifier moved to a field this version does not know
+      # and totals are inflated by the duplicate chunks. A null mid_coverage
+      # is meter JSON saved before the field existed; warn there too, because
+      # pre-fix Bedrock rows are exactly the ones already inflated. Explicit
+      # null tests, not //: coverage of 0 is exactly the value being looked
+      # for and // would discard it.
       + ( ($m.session.dedup // null) as $d
           | if $d == null or $d.rid_coverage == null then []
-            elif $d.rid_coverage == 0 then
-              ["no assistant entry in this transcript carries requestId, so the streaming dedup fell through to uuid for all \($d.entries) of them and collapsed nothing -- if the field was renamed rather than absent, this total is inflated by the duplicate chunks"]
+            elif $d.rid_coverage == 0
+                 and ($d.mid_coverage == null or $d.mid_coverage == 0) then
+              ["no assistant entry in this transcript carries requestId, and none measurably carries message.id, so the streaming dedup fell through to uuid for all \($d.entries) of them and collapsed nothing -- if the response identifier moved to a field this version does not know, this total is inflated by the duplicate chunks"]
             else [] end )
       # A tool_result whose tool_use is not in the transcript cannot be attributed
       # to a tool, so the tool_context table covers less than the session did.

@@ -214,7 +214,8 @@ so rates can come from the `claude-api` skill at runtime and this stays correct 
 prices change.
 
 Non-obvious constraints the meter handles, each of which silently corrupts totals:
-streaming duplicates assistant entries (dedupe by `requestId`); subagent turns live in
+streaming duplicates assistant entries (dedupe by response id: `requestId` on the
+first-party API, `message.id` on Bedrock); subagent turns live in
 separate `<session>/subagents/*.jsonl` files; main threads use 1h cache TTL while
 subagents use 5m, which price differently; wall-clock time is meaningless for resumed
 sessions, so active time uses gap bucketing.
