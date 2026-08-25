@@ -1230,6 +1230,48 @@ if command -v bd >/dev/null 2>&1; then
     say "  commit-discovery fixture skipped (bd workspace not created)"
   fi
   rm -rf "$GROOT"
+
+# ---- cross-row: no bead may be claimed by two sessions -------------------
+# Every check above this line is WITHIN one row or one file, and that is
+# exactly how the window-overlap defect survived a green suite: each evidence
+# file was internally valid and correctly derived, and the defect existed only
+# in the relationship BETWEEN files. Disjointness of claimed beads is a
+# cross-row property, so nothing here could see it.
+#
+# Scoped to a single drop-box rather than by workspace, because evidence files
+# carry session_id and NOT cwd. Bead ids are workspace-prefixed in practice, so
+# a cross-workspace collision would be a genuine finding too.
+crossrow_dupes() { # <evidence-dir> -> "<bead-id> <sid>,<sid>" per shared bead
+  local dir="$1" files
+  [ -d "$dir" ] || return 0
+  files="$(/usr/bin/find "$dir" -name '*.json' 2>/dev/null)"
+  [ -n "$files" ] || return 0
+  # shellcheck disable=SC2086
+  jq -s -r '
+    [ .[] | .session_id as $s | (.tasks // [])[] | {id: .id, sid: $s} ]
+    | group_by(.id)
+    | map(select((map(.sid) | unique | length) > 1))
+    | .[] | "\(.[0].id) \(map(.sid) | unique | join(","))"' $files 2>/dev/null
+}
+# The check must be able to FAIL, or it asserts nothing. Plant the defect.
+XR="$(mktemp -d "$TMP/lastcall-crossrow.XXXXXX")"
+mkdir -p "$XR/sess-one" "$XR/sess-two"
+jq -cn '{schema:"lastcall.evidence/1", source:"beads", session_id:"sess-one",
+         emitted_at:"2026-08-01T00:00:00Z",
+         tasks:[{id:"shared-bead-1", title:"t", status:"completed", artifacts:[]},
+                {id:"only-in-one",   title:"t", status:"completed", artifacts:[]}]}'   > "$XR/sess-one/beads.json"
+jq -cn '{schema:"lastcall.evidence/1", source:"beads", session_id:"sess-two",
+         emitted_at:"2026-08-01T01:00:00Z",
+         tasks:[{id:"shared-bead-1", title:"t", status:"completed", artifacts:[]}]}'   > "$XR/sess-two/beads.json"
+xr_out="$(crossrow_dupes "$XR")"
+if printf '%s' "$xr_out" | grep -q '^shared-bead-1 '    && printf '%s' "$xr_out" | grep -q 'sess-one'    && printf '%s' "$xr_out" | grep -q 'sess-two'    && [ "$(printf '%s\n' "$xr_out" | grep -c .)" = "1" ]
+then ok; else bad "cross-row check did not catch a bead claimed by two sessions"; fi
+rm -rf "$XR"
+# And the real drop-box must be clean. This is the assertion that would have
+# caught the defect the first time two rows carried evidence.
+real_dupes="$(crossrow_dupes "${LASTCALL_EVIDENCE_DIR:-$HOME/.claude/lastcall/evidence}")"
+if [ -z "$real_dupes" ]; then ok
+else bad "a bead is claimed by more than one session: $(printf '%s' "$real_dupes" | tr '\n' ';')"; fi
 fi
 
 # 3f. An in_progress bead whose started_at is absent. bd omits that key

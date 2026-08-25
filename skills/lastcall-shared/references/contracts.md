@@ -680,6 +680,53 @@ discovers the session commits itself, and writes one file per run:
   for consumers"; what was missing is the statement that it applies *across
   sessions* too. Cost is unaffected and needs no dedupe — it is per session,
   and both sessions are real spend. It is only the task count that inflates.
+- **A producer whose source is REACHABLE BUT FAILING writes nothing, and
+  warns.** This is a third state, and it is not the same as either of the two
+  below. `bd` never hits it — a local Dolt DB is present or absent, with no
+  network to fail — so the shipped producer models only two states, and a
+  network-backed producer that copies its logic gets this wrong on the first
+  auth failure.
+
+  Writing `tasks: []` on an HTTP 401 would claim an assessment that never
+  happened, and section 3's `per_task_basis` would file it under *assessed and
+  found nothing* — a measurement where there was none. That is precisely the
+  failure the empty marker was introduced to fix, pointing the other way. So:
+  **warn to stderr, write no file.** Absent evidence reads as *not assessed*,
+  which is the truthful outcome.
+
+  Do **not** add a status value or a `failed` marker document for this.
+  Section 3 has exactly three populations and a fourth would ripple into
+  `trend`. Collapsing into absent is already the correct claim; the stderr
+  warning is what keeps it from being silent.
+
+  For `gh` specifically the two states are separable by exit code, and
+  `gh help exit-codes` is misleading about how — measured, exit **4** is *no
+  credentials configured for this host* (does not apply, stay silent) while
+  exit **1** covers both *credentials rejected* and *host unreachable* (the
+  third state). Both are the same decision, so quote the tool's stderr rather
+  than classifying it. Note `gh auth status --json` always exits 0 and cannot
+  be used as this gate.
+- **Namespace `task.id` by everything that could collide, including the host.**
+  The rule is already stated as "prefix if it could collide with another
+  tracker", but the first non-beads producer is where it bites: `#123` is
+  unique per *repository*, not globally, so two repos in one session collide
+  and the merge rule below then undercounts silently. The required form is
+  `github:<host>/<owner>/<repo>#123` — host included, so a github.com issue and
+  a GitHub Enterprise Server issue with the same number never merge.
+- **`artifact_matches` keys are producer-defined; the TIERING is the reusable
+  part.** The beads table (`id` / `tracker` / `window`) is specific to what bd
+  records. What generalizes is the ordering: a *declared* link beats a commit
+  intersection, which beats a branch-name match, which beats a window. A
+  producer whose source maintains the link itself should never fall back to a
+  window key — it would import a weakness it does not have.
+- **Hazard, recorded rather than fixed: two producers describing one piece of
+  work in different id spaces double-count.** A user tracking the same task in
+  both beads and GitHub Issues emits two different `task.id` values, and the
+  merge rule keys on `task.id` alone, so nothing collapses them. `bd`'s
+  `external_ref` is the field that could bridge them, but making a GitHub
+  producer read a beads database defeats the point of a separate producer.
+  Calibrated before recording: **0 of 106 beads in this workspace carry an
+  `external_ref`**, so this is a design note, not a live defect.
 - **A run that matches no bead still writes its file, with `tasks: []`.** That
   empty document is the difference between *this producer does not apply here*
   (no file at all) and *it applied and found nothing* (a file with no tasks).
@@ -993,6 +1040,18 @@ build one from.
     and it is excluded from the ratios rather than trusted into them — the
     same absent-is-not-zero rule as everywhere else in this section.
 
+- **`work.commits` inherits the same overlap, and it is cosmetic.** Commits
+  are discovered with `git log --since/--until` over the identical window, so a
+  nested session's commits appear in the enveloping row too. Three things make
+  this a note rather than a defect. `trend` never reads `.work.commits` — the
+  only `.work` reference in it is `.work.tool_calls`, as the friction
+  denominator — so no median, ratio, or baseline figure is affected. A commit
+  legitimately relates to whatever session was open when it was made, unlike a
+  bead transition, which belongs to exactly one session; two rows both listing
+  a commit made while both were open is a true statement about both. But the
+  row does over-report, so **a cross-row consumer must dedupe on SHA before
+  counting**, exactly as section 2 requires deduping on `task.id`.
+
   This is disclosure, not a repair: the assignment itself is still wrong, and
   genuinely interleaved concurrent sessions can both legitimately fall inside
   each other windows. Narrowing the join from the window to actual session
@@ -1029,6 +1088,27 @@ build one from.
   row that never recorded `unverified` is *unknown*, not fully grounded.
   `per_task.rows` names the surviving population, because `with_evidence`
   counts a different one and sits close enough in the output to be misread.
+- **DECISION: the ledger row carries evidence COUNTS, not task ids, and
+  `trend` reports no cross-row task total.** Summing `evidence.completed`
+  across rows overstates — on one reported corpus, 127 task entries carried 84
+  distinct ids, 37 appearing in more than one file and 6 in three, so a naive
+  total was high by roughly 1.5x. `trend` has no such total today, which is
+  why this is latent rather than live.
+
+  Two ways to make one correct, and neither is free. Re-globbing the drop-box
+  at read time needs no schema change and `EVIDENCE` is already in scope in
+  `ledger.sh` — but the drop-box is a *rendezvous*, not an archive, and a
+  cleaned or rotated one would silently lose history the ledger is supposed to
+  hold. Carrying `task_ids` on the row is durable and self-sufficient, but
+  grows every row by the number of tasks and changes `lastcall.ledger/1`.
+
+  Deferred deliberately, on the same reasoning as the producer-registration
+  decision: **the consumer does not exist yet**, and building the schema
+  change for it would be building for a caller that has not arrived. When one
+  does, the answer is `task_ids` on the row, not the re-glob — the ledger must
+  stay readable without the drop-box. Until then the constraint is documented
+  in section 2 so a consumer that totals tasks dedupes on `task.id` first.
+  Revisit when something actually wants a ledger-wide task count.
 
 ---
 

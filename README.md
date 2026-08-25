@@ -135,6 +135,40 @@ Every claim in a summary must trace to an artifact — a file path, a commit SHA
 a task id, a test result. Transcripts are full of intentions that never landed,
 so nothing is ever summarized from conversational narrative alone.
 
+### Offline, air-gapped, and enterprise environments
+
+**Nothing in the evidence path needs a network, by design.** This is a property
+of the architecture, not an accident of the shipped producer, so it holds for
+restricted environments without any special mode:
+
+- `emit-evidence-beads.sh` makes no network call. Its only external command is
+  `bd list` against a local Dolt DB. Beads' sync is a separate, optional,
+  user-initiated action — the producer works with the NIC unplugged.
+- The drop-box's *intended* path, push producers, is offline by construction.
+  A skill that does real work writes a JSON file at its own task transitions,
+  and nothing needs to invoke it. The drop-box is a local filesystem
+  rendezvous; see `contracts.md` section 2.
+
+So for an air-gapped environment the answer is **use beads, or write a push
+producer**, and both work today with no changes.
+
+**Where the only thing available is a git remote and no API** — plain
+self-hosted git, Bitbucket Server, Perforce Swarm — the honest answer is that
+there is no defensible task signal, and `lastcall` says so by staying silent
+rather than inventing one. A producer that does not apply writes nothing and
+exits 0; it does not write an empty document, because that would claim an
+assessment it never made.
+
+Four candidates were considered for that case and rejected, all for the same
+reason — they would require reading intent out of prose, which is exactly what
+the grounding rule forbids: merge commits on an integration branch (task
+identity is still a subject line, and rebase-only shops produce none),
+annotated tags (releases, not tasks), `git notes` (structurally fine,
+effectively unused), and `Closes #123` trailers (written at commit time, so
+they assert intent rather than outcome). Cost, tokens, active time, open loops
+and the commit/memory/report delegations are all unaffected — only the
+per-task denominator goes unmeasured, and it is reported as unmeasured.
+
 ## Optional: capture the status line
 
 Two things Claude Code knows about a session appear nowhere in a transcript:
