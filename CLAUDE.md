@@ -169,12 +169,35 @@ AS1 is narrower than it first looked: `SKILL.md` carries a literal
 config* file specifically that trips it, not any path under `~/.claude`. Naming
 `permissions.allow` as the mechanism carried the same information safely.
 
+**Matching ignores word boundaries.** Found 2026-08-25: the phrase "step 7 of a
+skill a person has to invoke" scored a CRITICAL on the span **`kill a person`**,
+matched straight across the end of "s-kill". "a skill a human" — the wording it
+replaced — scores 0. So proofreading for whole words is not enough; the words
+here are innocent and only their concatenation is not. It is the one hit so far
+that no amount of reading the sentence would have predicted, and "invoked by
+hand" cleared it.
+
+That one also behaves differently from every earlier finding: a CRITICAL exits
+the scanner **non-zero**, and `bin/scan-skills.sh` reports any non-zero exit as
+`skillspector crashed ... Check the install and provider credentials`, which
+points the reader away from the finding and does not name it. `score` and
+`rule_id` both come back null, unlike the MEDIUM findings above. If the gate
+says "crashed", run the scanner directly before believing it.
+
 **Diagnosing a hit cheaply:** `REPORT_DIR=<dir> ./bin/scan-skills.sh <skill>`
 then `jq -r '.issues[0].finding' <dir>/<skill>.json` prints the matched span —
 `.finding` is the field that carries it; `.evidence` and `.snippet` are null.
-`.location.start_line` gives the line. That narrows it to a paragraph; to narrow
-it to a WORD, loop a one-word substitution over a scratch copy and re-scan,
-which is how "Write" was isolated above. Both are far faster than bisecting.
+`.location.start_line` gives the line. On a reported "crash" no report is kept,
+so run it by hand to get one:
+
+```bash
+skillspector scan skills/<skill> --no-llm --baseline .skillspector-baseline.yaml \
+  --format json --output <dir>/out.json >/dev/null 2>&1; echo "exit=$?"
+```
+
+That narrows it to a paragraph; to narrow it to a WORD, loop a one-word
+substitution over a scratch copy and re-scan, which is how "Write" was isolated
+above. Both are far faster than bisecting.
 
 Also note the local/CI version split: the installed scanner is v2.9.6 while
 `.github/workflows/skillspector.yml` pins v2.9.5 and `.skillspector-baseline.yaml`

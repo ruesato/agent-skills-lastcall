@@ -10,11 +10,35 @@
 #   meter-session.sh <sid> | emit-evidence-beads.sh [sha ...]
 #
 # Why a script rather than skill instructions: a producer implemented as
-# instructions depends on the agent remembering to run it at every task
-# transition, forever. A script cannot forget. And for beads-backed users
-# fathom-shared/memory.md:63 writes no per-task file under .fathom/tasks/, so
-# there is nothing for a Fathom-side emitter to mirror out — it would have to
-# read beads anyway. See contracts.md section 2.
+# instructions depends on the agent deriving evidence the same way at every
+# task transition, forever. A script derives it identically every run. And for
+# beads-backed users fathom-shared/memory.md:63 writes no per-task file under
+# .fathom/tasks/, so there is nothing for a Fathom-side emitter to mirror out —
+# it would have to read beads anyway. See contracts.md section 2.
+#
+# The limit of that claim, stated rather than left implied: only the DERIVATION
+# is automatic. Running this is step 7 of a skill, invoked by hand, and
+# no SessionEnd hook is configured here — verified 2026-08-25, project hooks is
+# an empty object and user settings carry PreToolUse alone. So a session closed
+# without lastcall emits nothing at the time.
+#
+# What keeps that a limit rather than a hole: it is recoverable. The window
+# filter below reads the recorded started/ended, so this same producer
+# re-derives the evidence afterwards from the transcript and the ledger row.
+# See README "Repairing a ledger row".
+#
+# A SessionEnd hook would close the gap and is not ruled out. What it would
+# have to accept, measured rather than assumed (docs verified 2026-08-25): the
+# event carries session_id, transcript_path and cwd, which is everything needed
+# here; it cannot block, and its output reaches the user through stderr only;
+# it fires on an enumerated set of terminations — clear, resume, logout,
+# prompt_input_exit, other — so it is not a guarantee on every exit path; and
+# such hooks share a 1.5s budget by default, raisable through a per-hook
+# timeout. Meter plus producer measured about 0.7s on this machine (70ms and
+# 648ms), so it fits today, though the producer cost grows with the number of
+# commits in the window. Adding one stays a user decision for the reason the
+# README gives for leaving the status line alone: a hook installed for someone
+# changes what the harness does at the end of every session.
 #
 # Absence of beads is the NORMAL case and exits 0 silently, the same way the
 # statusline capture is treated at meter-session.sh:74-77.
