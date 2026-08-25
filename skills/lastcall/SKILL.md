@@ -625,10 +625,13 @@ printf '%s' "$M2" | "$LEDGER_SH" append <sha> ...
 `emit-evidence-beads.sh` runs **before** the append, because `ledger.sh` reads
 the drop-box while building the row. It derives one `lastcall.evidence/1` file
 from beads closed inside the session window, and exits 0 silently when there is
-no beads workspace — the normal case for most projects. Pass it the same SHAs:
-a commit whose message names a bead becomes that task's artifact, and a
-`completed` task with no artifact is reported as `unverified` rather than
-counted. That is the grounding rule reaching into the evidence layer, so do not
+no beads workspace — the normal case for most projects. Both scripts
+**discover the session commits themselves**, from the metered window, so a
+session whose commits were made by another skill is still grounded; pass any
+SHAs you do know about and they are unioned in. A commit that names a bead
+becomes that task's artifact, a commit that merely falls inside the bead active
+range is a weaker `window` match, and a `completed` task with no artifact at all
+is reported as `unverified` rather than counted. That is the grounding rule reaching into the evidence layer, so do not
 invent artifacts to make the number look better.
 
 Why twice: the first reading was taken before this skill did its own work, so it
@@ -636,7 +639,10 @@ understates the session by exactly the amount `lastcall` cost. The second
 reading is what the ledger should carry. It is a jq pass over a local file — the
 second run is free.
 
-Pass any SHAs the commit delegation produced; they land in `work.commits`.
+`work.commits` is discovered from the same window. Pass any SHAs the commit
+delegation produced and they are unioned in, but the row no longer depends on
+it: before discovery, a clean-tree session recorded an empty commit list and
+every task in it read as unverified.
 
 The ledger is **keyed on `session_id` alone** and replaces that session's row in
 place, so re-running never appends a duplicate. Written by `lastcall` only —

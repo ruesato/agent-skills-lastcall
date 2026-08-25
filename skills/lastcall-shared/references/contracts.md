@@ -459,6 +459,11 @@ disk — and nothing guarantees a third-party producer's files survive there.
       // Grounding. See rules below — this field carries real weight.
       "artifacts": ["skills/shared/forges/gitlab.md", "PR#241", "commit:a1b2c3d"],
 
+      // Optional, additive. How each artifact was joined to this task, for
+      // producers that match rather than being told. Absent means unlabeled,
+      // never unearned. Consumers that only count grounding ignore it.
+      "artifact_matches": [{ "ref": "commit:a1b2c3d", "key": "id" }],
+
       "notes": "Free text. Why it went the way it did."
     }
   ]
@@ -489,14 +494,42 @@ disk — and nothing guarantees a third-party producer's files survive there.
 ### Shipped producer: `emit-evidence-beads.sh`
 
 Derives evidence from a beads workspace, so the seam is filled by a script
-rather than by an agent remembering to emit. Reads meter output on stdin, takes
-the session commit SHAs as arguments, and writes one file per run:
+rather than by an agent remembering to emit. Reads meter output on stdin,
+discovers the session commits itself, and writes one file per run:
 
 - A bead closed inside `[started, ended]` becomes `completed`; one moved to
   `in_progress` in that window becomes `partial`; `blocked` maps through.
-- `artifacts` are only the commits whose message **names the bead**. Attaching
-  every session commit to every task would manufacture grounding, so a task
-  nothing references stays empty and is reported `unverified`. That is the
+- **Session commits are discovered from the metered window**, and any SHAs
+  passed as arguments are unioned in and deduped. Discovery exists because
+  `lastcall` offers its commit delegation only on a dirty tree: a session whose
+  commits came from another skill passed zero SHAs, and the matcher then ran no
+  comparison at all. `LASTCALL_COMMIT_DISCOVERY=0` restores argv-only.
+- **Join keys, strongest first, and every match carries its key.**
+
+  | Key | Match | Strength |
+  |---|---|---|
+  | `id` | the message names the bead id | exact |
+  | `tracker` | the message names the `external_ref` bd records | exact |
+  | `window` | commit time inside the bead own active range | weak |
+
+  A bead with any exact match uses only those, so an earned commit is never
+  diluted by everything committed beside it; `window` applies only when no
+  exact match exists, and only when the bead carries a `started_at` to bound
+  it. File overlap was considered as a fourth key and rejected: the meter does
+  not see edits made through Bash, so absence there proves nothing.
+
+  Do NOT look for a `Closes <ref>` trailer in a Fathom commit. Its
+  `conventions.md` puts that line in the REVIEW body; its commit-message
+  section defines `type(<issue-ref>): summary`, so the ref is in the
+  conventional-commit scope, which is what the `tracker` key reads.
+- Two limits of the window query, recorded rather than papered over.
+  `--since`/`--until` filter on **committer** date — verified by dating a
+  commit 2020 and committing it today, where it appears in a 2026 window and is
+  absent from a 2020 one — so a rebase inside the window can sweep in older
+  work. And any commit made in that checkout during the window is picked up
+  whoever authored it.
+- Attaching every session commit to every task would inflate grounding, so a
+  task nothing references stays empty and is reported `unverified`. That is the
   intended outcome, not a gap.
 - No beads workspace, no `bd`, or no window: exits 0 silently and writes
   nothing. Absence is the normal case.
@@ -506,10 +539,11 @@ the session commit SHAs as arguments, and writes one file per run:
   of the absence-is-visible discipline here. A bad SHA degrades grounding; it
   does not lose the evidence file.
 - **Completed tasks with zero artifacts warn once**, and the warning names the
-  cause rather than the symptom: no SHAs reached the producer, none of the ones
-  passed resolve, or none of the resolved commits names a bead id. A commit
-  grounds a task by naming its id in the message, which is what a
-  `Closes <bead-id>` trailer does. Both commit discovery and any external
+  cause rather than the symptom: the workspace is not a git repository, no
+  commit falls in the window and none was passed, none of the SHAs passed
+  resolve, or none of the commits in scope matches any join key. A commit
+  grounds a task by naming it — a `Closes <bead-id>` trailer, or the issue ref
+  in the conventional-commit scope. Both commit discovery and any external
   producer are best effort, so the file can look healthy while every task in it
   reports `unverified` with nothing saying why; this closes that silent-failure
   mode. Non-fatal — the evidence file is still emitted.
@@ -574,6 +608,8 @@ Global across projects, with `cwd` as a filterable field. Written by
   },
 
   "tokens":   { /* contract 1 `tokens`, verbatim */ },
+  // commits is discovered from the metered window, unioned with any SHAs the
+  // caller passed and deduped to the abbreviated form.
   "work":     { "tool_calls": 218, "files_changed": 25, "commits": ["a1b2c3d"] },
   "friction": { "tool_errors": 7, "interrupts": 1, "denials": 0 },
 
@@ -614,10 +650,12 @@ Global across projects, with `cwd` as a filterable field. Written by
   a metering bug is fixed, affected rows are re-metered, never scaled: the
   inflation factor varies per field and per session (1.36x–3.74x across
   fields in the 2026-08-23 Bedrock report, invariant 1), so no single factor
-  repairs a stored row. `append` replaces the row wholesale and takes
-  `work.commits` from argv, so extract `.work.commits` from each affected row
-  BEFORE re-metering and re-pass those SHAs, or the repair silently strips
-  the session-to-commit grounding. Evidence is safer: it survives if the
+  repairs a stored row. `append` replaces the row wholesale, and
+  `work.commits` now re-derives from the recorded `started`/`ended` window, so
+  a repair no longer strips the session-to-commit grounding on its own. It is
+  still worth extracting `.work.commits` from the affected row and re-passing
+  those SHAs, because a commit rewritten by a rebase since the original run has
+  a committer date the window no longer covers. Evidence is safer: it survives if the
   drop-box files persist (`evidence_for` re-reads them at append), and
   re-derives through `emit-evidence-beads.sh` even if they do not, because
   its window filter reads the session's recorded `started`/`ended`.

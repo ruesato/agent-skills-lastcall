@@ -5,8 +5,9 @@
 #   ledger.sh trend [session-id]                 # baseline, optionally comparing one session
 #   ledger.sh list [--cwd PATH]                  # dump rows
 #
-# Any SHAs passed to `append` land in work.commits — lastcall passes the
-# commits its delegation actually created.
+# work.commits is discovered from the metered window, so commits made by another
+# skill during the session are counted. Any SHAs passed to `append` are unioned
+# in on top of that.
 #
 # Written by lastcall only. tally never writes.
 set -euo pipefail
@@ -73,11 +74,37 @@ evidence_for() {
 }
 
 cmd_append() {
-  local meter cost sid ev row commits
-  # Commits created by lastcall's delegation, if any. Passed in rather than
-  # derived: only the caller knows which commits belong to this session.
-  commits="$(printf '%s\n' "$@" | jq -Rs 'split("\n") | map(select(length > 0))')"
+  local meter cost sid ev row commits repo t0 t1
   meter="$(cat)"
+
+  # Session commits, discovered from the metered window and unioned with any
+  # SHAs the caller passed. The old comment here said only the caller knows
+  # which commits belong to this session, which was true when lastcall was the
+  # only committer; it is not true once another skill commits during the run,
+  # and that session then recorded an empty commit list. Same query and same
+  # caveats as emit-evidence-beads.sh: --since/--until filter on COMMITTER
+  # date, so a rebase inside the window can sweep in older work, and any commit
+  # made in this checkout during the window is counted whoever authored it.
+  # LASTCALL_COMMIT_DISCOVERY=0 falls back to the passed SHAs alone.
+  repo="$(printf '%s' "$meter" | jq -r '.session.cwd // empty')"
+  if [ -z "$repo" ] || [ ! -d "$repo" ]; then repo="$PWD"; fi
+  t0="$(printf '%s' "$meter" | jq -r '.session.started // empty')"
+  t1="$(printf '%s' "$meter" | jq -r '.session.ended // empty')"
+  # Both sources are normalized to the abbreviated form before the union, or a
+  # full SHA passed by the caller would survive dedupe beside the short one the
+  # window query returns and the row would carry the same commit twice.
+  commits="$( { if git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+        for sha in ${1+"$@"}; do
+          git -C "$repo" rev-parse --verify --quiet --short "${sha}^{commit}" \
+            || printf '%s\n' "$sha"
+        done
+        if [ "${LASTCALL_COMMIT_DISCOVERY:-1}" != "0" ] && [ -n "$t0" ] && [ -n "$t1" ]; then
+          git -C "$repo" log --since="$t0" --until="$t1" --no-merges --format='%h' 2>/dev/null || true
+        fi
+      else
+        printf '%s\n' ${1+"$@"}
+      fi
+    } | jq -Rs 'split("\n") | map(select(length > 0)) | unique')"
   cost="$(printf '%s' "$meter" | "$COST")"
   sid="$(printf '%s' "$meter" | jq -r '.session.id')"
   ev="$(evidence_for "$sid")"

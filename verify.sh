@@ -720,6 +720,101 @@ if LASTCALL_LEDGER="$LJ" "$S/ledger.sh" trend | jq -e '
 then ok; else bad "trend reported a metering span on a single-version ledger"; fi
 rm -rf "$LROOT"
 
+# 3e. Commit discovery and the match keys. lastcall offers its commit
+# delegation only when the tree is dirty, so a session whose commits were made
+# by another skill passed ZERO SHAs to the producer and earned zero grounding —
+# the matcher never ran a comparison at all. Discovery from the metered window
+# closes that. Each match carries the key that earned it, because a commit that
+# names the bead and one that merely shares its time range are not equally
+# strong evidence and a reader has to be able to tell them apart.
+#
+# Needs a real bd and a real git repo; both are skipped rather than failed when
+# bd is absent, the same way the producer itself treats a missing bd.
+if command -v bd >/dev/null 2>&1; then
+  GROOT="$(mktemp -d "$TMP/lastcall-commits.XXXXXX")"
+  gid() { grep -oE 'vx-[a-z0-9.]+' | head -1; }
+  (
+    cd "$GROOT" || exit 1
+    git init -q . && git config user.email v@v.test && git config user.name V
+    bd init --prefix vx >/dev/null 2>&1 || exit 1
+    A="$(bd create --title="A" --description=d --type=task --priority=2 2>&1 | gid)"
+    B="$(bd create --title="B" --description=d --type=task --priority=2 \
+           --external-ref="ONC-5" 2>&1 | gid)"
+    C="$(bd create --title="C" --description=d --type=task --priority=2 2>&1 | gid)"
+    D="$(bd create --title="D" --description=d --type=task --priority=2 2>&1 | gid)"
+    [ -n "$A" ] && [ -n "$B" ] && [ -n "$C" ] && [ -n "$D" ] || exit 1
+    printf '%s %s %s %s\n' "$A" "$B" "$C" "$D" > ids
+
+    # Dated well before C becomes active, so they land in the SESSION window
+    # without falling inside the bead own range. That is what keeps the window
+    # key from silently passing on commits an exact key already claimed.
+    early="$(date -u -r $(( $(date +%s) - 1800 )) +%Y-%m-%dT%H:%M:%SZ)"
+    echo a > f; git add f
+    GIT_COMMITTER_DATE="$early" git commit -q --date="$early" -m "fix: a. Closes $A"
+    echo b > f
+    GIT_COMMITTER_DATE="$early" git commit -qa --date="$early" -m "feat(ONC-5): b"
+    echo c > f
+    GIT_COMMITTER_DATE="$early" git commit -qa --date="$early" -m "docs: names nothing"
+
+    # C is the window case: commit stamped exactly at started_at, which the
+    # inclusive bound accepts, and closed afterwards. Reading started_at back
+    # from bd rather than guessing a clock keeps this deterministic.
+    bd update "$C" --status in_progress >/dev/null 2>&1
+    cs="$(bd list --all --limit 0 --json --skip-labels 2>/dev/null \
+          | jq -r --arg c "$C" '(if type == "object" then (.issues // []) else . end)
+                                | map(select(.id == $c))[0].started_at // empty')"
+    [ -n "$cs" ] || exit 1
+    echo d > f
+    GIT_COMMITTER_DATE="$cs" git commit -qa --date="$cs" -m "chore: inside the C range"
+    bd close "$A" "$B" "$C" "$D" >/dev/null 2>&1
+  )
+  if [ -s "$GROOT/ids" ]; then
+    read -r fA fB fC fD < "$GROOT/ids"
+    gt0="$(date -u -r $(( $(date +%s) - 3600 )) +%Y-%m-%dT%H:%M:%SZ)"
+    gt1="$(date -u -r $(( $(date +%s) + 3600 )) +%Y-%m-%dT%H:%M:%SZ)"
+    gmeter="$(jq -cn --arg cwd "$GROOT" --arg t0 "$gt0" --arg t1 "$gt1" \
+      '{session: {id: "fixture-commit-keys", cwd: $cwd, branch: "main",
+                  started: $t0, ended: $t1, active_s: 1},
+        tokens: [], agents: [], work: {tools: {}, files: {}, skills: []},
+        friction: {tool_errors: 0, interrupts: 0, denials: 0}, evidence: []}')"
+    GEV="$GROOT/evidence"
+    gout="$(printf '%s' "$gmeter" \
+            | LASTCALL_EVIDENCE_DIR="$GEV" "$S/emit-evidence-beads.sh" 2>/dev/null)"
+    if [ -s "$gout" ] && jq -e --arg a "$fA" --arg b "$fB" --arg c "$fC" --arg d "$fD" '
+          (.tasks | map({key: .id, value: .artifact_matches}) | from_entries) as $m
+          | ([$m[$a][].key] == ["id"])
+            and ([$m[$b][].key] == ["tracker"])
+            and ([$m[$c][].key] == ["window"])
+            and (($m[$d] | length) == 0)' "$gout" >/dev/null 2>&1
+    then ok; else bad "commit discovery did not label the id/tracker/window keys"; fi
+    # Zero SHAs passed is the whole point: the bug was that argv was the only
+    # source. Grounding must appear without the caller handing anything over.
+    if [ -s "$gout" ] && jq -e '[.tasks[].artifacts[]] | length >= 3' "$gout" >/dev/null 2>&1
+    then ok; else bad "commit discovery found no artifacts with zero SHAs passed"; fi
+    # And turning discovery off must return the old behavior exactly.
+    goff="$(printf '%s' "$gmeter" | LASTCALL_EVIDENCE_DIR="$GEV.off" \
+            LASTCALL_COMMIT_DISCOVERY=0 "$S/emit-evidence-beads.sh" 2>/dev/null)"
+    if [ -s "$goff" ] && jq -e '[.tasks[].artifacts[]] | length == 0' "$goff" >/dev/null 2>&1
+    then ok; else bad "LASTCALL_COMMIT_DISCOVERY=0 still discovered commits"; fi
+    # ledger work.commits rides on the same window, and a full SHA passed by the
+    # caller must not survive dedupe beside the short one the query returns.
+    gfull="$(git -C "$GROOT" log --format=%H -1)"
+    gshort="$(git -C "$GROOT" rev-parse --short "$gfull")"
+    # Count is >= the four commits made here rather than exact: bd init writes a
+    # commit of its own, and pinning that would test bd rather than discovery.
+    if printf '%s' "$gmeter" | LASTCALL_LEDGER="$GROOT/led" "$S/ledger.sh" append \
+         "$gfull" >/dev/null 2>&1 \
+       && jq -e --arg s "$gshort" '(.work.commits | length) >= 4
+                 and (.work.commits | length) == (.work.commits | unique | length)
+                 and ([.work.commits[] | select(. == $s)] | length) == 1' \
+            "$GROOT/led" >/dev/null 2>&1
+    then ok; else bad "ledger did not discover or dedupe the session commits"; fi
+  else
+    say "  commit-discovery fixture skipped (bd workspace not created)"
+  fi
+  rm -rf "$GROOT"
+fi
+
 say "  fixtures checked"
 
 # ---------------------------------------------------------------- result
