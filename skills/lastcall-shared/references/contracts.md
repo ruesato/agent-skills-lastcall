@@ -664,10 +664,20 @@ Global across projects, with `cwd` as a filterable field. Written by
   a repair no longer strips the session-to-commit grounding on its own. It is
   still worth extracting `.work.commits` from the affected row and re-passing
   those SHAs, because a commit rewritten by a rebase since the original run has
-  a committer date the window no longer covers. Evidence is safer: it survives if the
-  drop-box files persist (`evidence_for` re-reads them at append), and
-  re-derives through `emit-evidence-beads.sh` even if they do not, because
-  its window filter reads the session's recorded `started`/`ended`.
+  a committer date the window no longer covers. Evidence survives if the
+  drop-box files persist, because `evidence_for` re-reads them at append, and
+  re-derives through `emit-evidence-beads.sh` even if they do not, because its
+  window filter reads the session's recorded `started`/`ended`.
+- **A repair must run the producer itself.** Nothing in `ledger.sh` writes the
+  drop-box — `evidence_for` only reads it, and `emit-evidence-beads.sh` is
+  invoked from the skill, not from `append`. So a row written by a bare
+  `ledger.sh append` repair carries `evidence: null`, and re-metering alone
+  never lifts it: the same null row comes back every time. That is not
+  hypothetical — an external report arrived with 13 of 14 rows in exactly that
+  state from one repair pass, which is why its `with_evidence` read 0, and
+  `trend` excludes such rows from every per-task ratio. The producer runs
+  *before* `append`, both reading the same `LASTCALL_EVIDENCE_DIR`; README
+  "Repairing a ledger row" carries the recipe and `verify.sh` pins it.
 - **`pricing_source` is required.** A cost figure whose rate table is unknown
   cannot be compared against other rows, and rates change over time.
 - **`promo_applied` records the pricing regime, and absent means unknown.** A

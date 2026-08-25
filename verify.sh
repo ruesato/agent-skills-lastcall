@@ -809,6 +809,36 @@ if command -v bd >/dev/null 2>&1; then
                  and ([.work.commits[] | select(. == $s)] | length) == 1' \
             "$GROOT/led" >/dev/null 2>&1
     then ok; else bad "ledger did not discover or dedupe the session commits"; fi
+
+    # THE BACKFILL PATH. emit-evidence-beads.sh has one call site, in the skill;
+    # nothing inside ledger.sh writes the drop-box, it only reads it. So a row
+    # produced by a direct `ledger.sh append` repair carries evidence: null
+    # forever, and re-metering never fixes it — the external report arrived with
+    # 13 of 14 rows in that state from a single repair pass, which is why
+    # with_evidence read 0. The capability was already promised in contracts.md;
+    # only the recipe was missing. This pins the recipe the README now carries.
+    #
+    # First half: reproduce the failure. Same meter, empty drop-box, null row.
+    GBF="$GROOT/backfill"
+    if printf '%s' "$gmeter" | LASTCALL_LEDGER="$GBF/led" LASTCALL_EVIDENCE_DIR="$GBF/ev" \
+         "$S/ledger.sh" append >/dev/null 2>&1 \
+       && jq -e '.evidence == null' "$GBF/led" >/dev/null 2>&1
+    then ok; else bad "append with an empty drop-box did not record evidence as null"; fi
+    # Second half: run the producer into that same drop-box and append again.
+    # The row must GAIN evidence and be replaced, not duplicated — the repair is
+    # keyed on session_id, so a second row would split the session in trend.
+    if printf '%s' "$gmeter" | LASTCALL_EVIDENCE_DIR="$GBF/ev" \
+         "$S/emit-evidence-beads.sh" >/dev/null 2>&1 \
+       && printf '%s' "$gmeter" | LASTCALL_LEDGER="$GBF/led" LASTCALL_EVIDENCE_DIR="$GBF/ev" \
+            "$S/ledger.sh" append >/dev/null 2>&1 \
+       && [ "$(jq -s length "$GBF/led")" = "1" ] \
+       && jq -e '.evidence != null and .evidence.completed == 4
+                 and (.evidence.sources == ["beads"])' "$GBF/led" >/dev/null 2>&1
+    then ok; else bad "backfill recipe did not re-derive evidence for an existing row"; fi
+    # And the row is now countable in trend, which is the whole point: the
+    # baseline excludes rows without evidence, so a null row is invisible there.
+    if [ "$(LASTCALL_LEDGER="$GBF/led" "$S/ledger.sh" trend | jq -r '.with_evidence')" = "1" ]
+    then ok; else bad "backfilled row still did not count toward with_evidence"; fi
   else
     say "  commit-discovery fixture skipped (bd workspace not created)"
   fi

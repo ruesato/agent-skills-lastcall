@@ -159,15 +159,56 @@ This is a shell + jq project. There is no `package.json` and no build step.
 
 ```bash
 S=skills/lastcall-shared/scripts
-M=$($S/meter-session.sh <session-uuid>)          # always pass the id
-printf '%s' "$M" | $S/cost.sh                    # dollars
-printf '%s' "$M" | $S/openloops.sh               # what is unfinished
-printf '%s' "$M" | $S/ledger.sh append [sha ...] # write/replace this row
-$S/ledger.sh trend <session-uuid>                # baseline + focus comparison
+M=$($S/meter-session.sh <session-uuid>)           # always pass the id
+printf '%s' "$M" | $S/cost.sh                     # dollars
+printf '%s' "$M" | $S/openloops.sh                # what is unfinished
+printf '%s' "$M" | $S/emit-evidence-beads.sh      # fill the drop-box FIRST
+printf '%s' "$M" | $S/ledger.sh append [sha ...]  # write/replace this row
+$S/ledger.sh trend <session-uuid>                 # baseline + focus comparison
 ```
+
+The producer line is third for a reason — see below.
 
 Set `LASTCALL_LEDGER` to a scratch path while testing, so the real baseline at
 `~/.claude/lastcall/ledger.jsonl` is not polluted.
+
+### Repairing a ledger row
+
+`ledger.sh append` **reads** the evidence drop-box and never writes it.
+`emit-evidence-beads.sh` is what writes it, and it is invoked from the skill,
+not from `append`. So a row you produce by running `append` yourself carries
+`evidence: null` — and re-metering alone never repairs it, because the same
+empty drop-box yields the same null row. Rows without evidence are excluded
+from every per-task ratio in `ledger.sh trend`, so they are invisible in the
+baseline rather than merely incomplete.
+
+Run the producer first, and point both at the same drop-box:
+
+```bash
+S=skills/lastcall-shared/scripts       # or ~/.lastcall/bin once installed
+M=$($S/meter-session.sh <session-uuid>)
+printf '%s' "$M" | $S/emit-evidence-beads.sh
+printf '%s' "$M" | $S/ledger.sh append
+```
+
+Both steps are idempotent, so this is safe to re-run: the producer writes a new
+timestamped file each time and `evidence_for` dedupes on `(source, task id)`
+keeping the newest, while `append` replaces the row keyed on `session_id`
+alone. What it needs:
+
+- **The transcript still on disk.** `meter-session.sh` reads it; there is no
+  other source for the session window.
+- **The right working directory.** The producer walks up from the session's
+  recorded `cwd` looking for `.beads`, falling back to `$PWD` when that path no
+  longer exists — the usual case after a directory rename.
+- **`LASTCALL_EVIDENCE_DIR` set the same way for both**, if you override it.
+  Producing into one drop-box and appending from another is the failure this
+  recipe exists to fix, spelled differently.
+
+Re-derivation is honest, not generous: only beads whose transition falls inside
+the session's recorded window come back. A session that closed nothing produces
+no evidence file, and the producer exits 0 silently — the same way it treats a
+machine with no beads workspace at all.
 
 `./verify.sh` runs every script against every transcript on this machine.
 Sessions with and without subagents exercise different code paths, and that

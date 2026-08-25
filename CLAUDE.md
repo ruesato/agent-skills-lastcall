@@ -102,10 +102,21 @@ M=$($S/meter-session.sh <session-uuid>)   # always pass the id; the fallback
                                           # is wrong when sessions share a dir
 printf '%s' "$M" | $S/cost.sh             # dollars
 printf '%s' "$M" | $S/openloops.sh        # what is unfinished
+printf '%s' "$M" | $S/emit-evidence-beads.sh       # fill the drop-box FIRST
 printf '%s' "$M" | $S/ledger.sh append [sha ...]   # write/replace this row
 $S/ledger.sh trend <session-uuid>         # baseline + focus comparison
 IDLE_GAP_S=600 $S/meter-session.sh        # widen the idle threshold
 ```
+
+**The producer line is not optional when you repair a row by hand.**
+`ledger.sh append` only READS the drop-box; `emit-evidence-beads.sh` is what
+writes it, and it is invoked from the skill, never from `append`. So a row
+written by a bare `append` carries `evidence: null` and re-metering alone never
+lifts it — the same empty drop-box yields the same null row, and `trend`
+excludes such rows from every per-task ratio. An external report arrived with
+13 of 14 rows in that state from a single repair pass. Both steps read the same
+`LASTCALL_EVIDENCE_DIR`, and both are idempotent, so re-running is safe. README
+"Repairing a ledger row" carries the full recipe and `verify.sh` pins it.
 
 Set `LASTCALL_LEDGER` to a scratch path while testing so the real baseline at
 `~/.claude/lastcall/ledger.jsonl` is not polluted.
