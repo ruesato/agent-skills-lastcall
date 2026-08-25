@@ -915,6 +915,40 @@ if command -v bd >/dev/null 2>&1; then
     # baseline excludes rows without evidence, so a null row is invisible there.
     if [ "$(LASTCALL_LEDGER="$GBF/led" "$S/ledger.sh" trend | jq -r '.with_evidence')" = "1" ]
     then ok; else bad "backfilled row still did not count toward with_evidence"; fi
+
+    # THE EMPTY-PRODUCER MARKER. A producer that ran and matched nothing used
+    # to be indistinguishable from no producer at all: both reached the ledger
+    # as evidence: null and both showed per_task: null. Same fixture workspace,
+    # same beads, but a session window in 2019 that no bead can fall inside.
+    GMK="$GROOT/marker"
+    mkmeter="$(printf '%s' "$gmeter" | jq -c '.session.id = "fixture-marker"
+      | .session.started = "2019-01-01T00:00:00Z"
+      | .session.ended   = "2019-01-02T00:00:00Z"')"
+    mkout="$(printf '%s' "$mkmeter" | LASTCALL_EVIDENCE_DIR="$GMK/ev" \
+             "$S/emit-evidence-beads.sh" 2>/dev/null)"
+    if [ -s "$mkout" ] && jq -e '.schema == "lastcall.evidence/1"
+          and .source == "beads" and (.tasks | length) == 0' "$mkout" >/dev/null 2>&1
+    then ok; else bad "producer matched no beads and wrote no marker file"; fi
+    # The marker must reach the ledger as an ASSESSED zero, not as absence.
+    if printf '%s' "$mkmeter" | LASTCALL_LEDGER="$GMK/led" LASTCALL_EVIDENCE_DIR="$GMK/ev" \
+         "$S/ledger.sh" append >/dev/null 2>&1 \
+       && jq -e '.evidence != null and .evidence.completed == 0
+                 and (.evidence.sources == ["beads"])' "$GMK/led" >/dev/null 2>&1
+    then ok; else bad "empty marker did not record as assessed-zero evidence"; fi
+    # And it must not buy its way into the per-task ratios: completed is 0, so
+    # the row stays out of with_evidence while still explaining the null.
+    mktrend="$(LASTCALL_LEDGER="$GMK/led" "$S/ledger.sh" trend "fixture-marker")"
+    if [ "$(printf '%s' "$mktrend" | jq -r '.with_evidence')" = "0" ] \
+       && [ "$(printf '%s' "$mktrend" | jq -r '.per_task')" = "null" ] \
+       && printf '%s' "$mktrend" | jq -e '(.per_task_basis | test("a producer ran and matched none"))
+             and (.focus.per_task_basis | test("^assessed by beads"))' >/dev/null 2>&1
+    then ok; else bad "trend did not distinguish an assessed zero from an unassessed row"; fi
+    # The other half of the split: no producer at all still reads as absent.
+    if printf '%s' "$mkmeter" | LASTCALL_LEDGER="$GMK/led2" LASTCALL_EVIDENCE_DIR="$GMK/none" \
+         "$S/ledger.sh" append >/dev/null 2>&1 \
+       && LASTCALL_LEDGER="$GMK/led2" "$S/ledger.sh" trend "fixture-marker" \
+          | jq -e '.focus.per_task_basis | test("^not assessed")' >/dev/null 2>&1
+    then ok; else bad "a row with no producer did not report itself as not assessed"; fi
   else
     say "  commit-discovery fixture skipped (bd workspace not created)"
   fi

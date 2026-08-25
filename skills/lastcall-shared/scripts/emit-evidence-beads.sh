@@ -233,8 +233,21 @@ out="$(printf '%s' "$issues" | jq -c \
       emitted_at: (now | todateiso8601), tasks: . }
 ')"
 
-count="$(printf '%s' "$out" | jq '.tasks | length')"
-[ "$count" -gt 0 ] || exit 0
+# A run that matched no beads still writes its file, with an empty `tasks`
+# array. That is the whole point of the marker: without it, "this producer ran
+# and found nothing" and "no producer ran here at all" both reached the ledger
+# as `evidence: null`, and `trend` reported `per_task: null` for both. One of
+# those is a measurement and the other is the absence of one, and section 3
+# requires absent evidence to be recorded as absent rather than as zero.
+#
+# It is not a retraction. Consumers dedupe on (source, task.id) keeping the
+# highest `emitted_at`, and an empty document carries no task ids, so a later
+# empty run cannot erase tasks an earlier run established.
+#
+# The early exits above stay silent and write nothing, because they are the
+# other state: no `bd` on PATH, no beads workspace, no session window, or no
+# issues at all means this producer does not APPLY here, which is a different
+# fact from applying and matching nothing.
 
 # Completed work that nothing points at is the silent failure of this producer:
 # the evidence file looks healthy, and every task inside it reports unverified

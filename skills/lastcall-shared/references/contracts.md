@@ -631,7 +631,18 @@ discovers the session commits itself, and writes one file per run:
   task nothing references stays empty and is reported `unverified`. That is the
   intended outcome, not a gap.
 - No beads workspace, no `bd`, or no window: exits 0 silently and writes
-  nothing. Absence is the normal case.
+  nothing. Absence is the normal case. **This is not the same state as running
+  and matching nothing**, and the two must not arrive at a consumer looking
+  alike — see the marker rule below.
+- **A run that matches no bead still writes its file, with `tasks: []`.** That
+  empty document is the difference between *this producer does not apply here*
+  (no file at all) and *it applied and found nothing* (a file with no tasks).
+  Before it existed both reached the ledger as `evidence: null`, so `trend`
+  reported `per_task: null` for a session that was never assessed and for one
+  that was assessed and came back zero — a measurement and the absence of one,
+  reported identically. Section 3 requires absent evidence to be recorded as
+  absent; the marker is what makes that rule enforceable in the other
+  direction too.
 - A SHA git cannot resolve **warns to stderr** and the run continues. Dropping
   it silently would strip a task of its grounding and report it unverified with
   nothing saying why — the inverse of `files_coverage.attributed` and the rest
@@ -655,6 +666,14 @@ discovers the session commits itself, and writes one file per run:
 - Glob all `*.json`; skip unparseable files with a warning rather than aborting.
 - Dedupe on `(source, task.id)`, keeping the highest `emitted_at`. A task
   re-emitted as `completed` supersedes its earlier `partial`.
+- **An empty `tasks` array is a marker, never a retraction.** It says the
+  producer ran; it does not withdraw what an earlier run established. Dedupe is
+  keyed on task id and an empty document carries none, so this falls out of the
+  rule above rather than needing a special case — but a consumer that reads the
+  newest file per source instead of deduping per task would get it wrong.
+- A source appearing in `sources` with zero tasks counted means *assessed,
+  nothing found*. Distinguish it from a source that is absent entirely, which
+  means *not assessed*. Never fold the first into the second.
 
 ---
 
@@ -803,6 +822,18 @@ build one from.
 - **Absent evidence is recorded as absent**, never as zero completed tasks.
   A session with no evidence files reports "not assessed" — inferring
   productivity from token burn rewards thrashing.
+- **`per_task_basis` says which of three populations a null came from.**
+  `trend` reports it beside `per_task`, and the focus block beside
+  `per_task_usd`. The three states are: rows carrying completed tasks, which
+  are the only ones in the ratios; rows a producer assessed and found nothing
+  in (`evidence` non-null, `completed` 0, driven by the empty marker in section
+  2); and rows never assessed (`evidence: null`). A bare `null` conflated all
+  three, and the third is also what a repair pass that skipped the producer
+  leaves behind, so the reader could not tell a quiet workspace from a broken
+  recipe. The field is emitted even when `per_task` is present: a ratio drawn
+  from 2 of 30 rows needs the same disclosure as one drawn from none. Assessed
+  zeroes stay out of `with_evidence` and out of every ratio — they explain the
+  null, they do not populate it.
 
 ---
 

@@ -238,9 +238,14 @@ alone. What it needs:
   recipe exists to fix, spelled differently.
 
 Re-derivation is honest, not generous: only beads whose transition falls inside
-the session's recorded window come back. A session that closed nothing produces
-no evidence file, and the producer exits 0 silently — the same way it treats a
-machine with no beads workspace at all.
+the session's recorded window come back. A session that closed nothing still
+gets an evidence file, carrying an empty `tasks` array. That marker is the
+difference between *the producer ran here and found nothing* and *no producer
+ran at all* — the second is a machine with no beads workspace, where the
+producer writes nothing and exits 0 silently. Both used to reach the ledger as
+`evidence: null`; now only the second does, and `ledger.sh trend` reports which
+one you are looking at in `per_task_basis`. An assessed zero still stays out of
+the per-task ratios: it explains the null rather than populating it.
 
 `./verify.sh` runs every script against every transcript on this machine.
 Sessions with and without subagents exercise different code paths, and that

@@ -226,6 +226,20 @@ cmd_trend() {
           active_min_median: ($withev | map((.active_s/60) / .evidence.completed) | pct(0.5) | r2)
         } end),
 
+        # A null per_task used to mean three different things at once, and the
+        # reader could not tell which: no producer exists in these workspaces,
+        # a producer ran and matched nothing, or rows were repaired without one.
+        # Since the beads producer writes an empty-tasks marker, a row that was
+        # assessed and came back zero is distinguishable from a row that was
+        # never assessed, so say which populations are in play. Emitted even
+        # when per_task is present, because a ratio drawn from 2 of 30 rows
+        # deserves the same disclosure as one drawn from none.
+        per_task_basis:
+          (($all | map(select(.evidence == null)) | length) as $noev
+           | ($all | map(select(.evidence != null and .evidence.completed == 0))
+                   | length) as $empty
+           | "\($withev|length) row(s) with completed tasks, \($empty) where a producer ran and matched none, \($noev) not assessed"),
+
         pricing_sources: ($all | map(.cost.pricing_source) | unique),
 
         # A promo expiring re-prices every later session without anything about
@@ -302,7 +316,14 @@ cmd_trend() {
                  then "suppressed — only \($peers|length) other session(s) to compare against"
                  else "median of \($peers|length) other sessions" end),
               per_task_usd: (if $s.evidence != null and $s.evidence.completed > 0
-                             then ($s.cost.usd / $s.evidence.completed | r2) else null end)
+                             then ($s.cost.usd / $s.evidence.completed | r2) else null end),
+              # Same three-way split as per_task_basis above, for the one row.
+              per_task_basis:
+                (if $s.evidence == null
+                 then "not assessed — no evidence producer ran for this session"
+                 elif $s.evidence.completed == 0
+                 then "assessed by \($s.evidence.sources | join(", ")) — no completed task matched"
+                 else "\($s.evidence.completed) completed task(s) from \($s.evidence.sources | join(", "))" end)
             } } end
        end)
   ' "$LEDGER"
