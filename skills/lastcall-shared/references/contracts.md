@@ -918,6 +918,39 @@ build one from.
   from 2 of 30 rows needs the same disclosure as one drawn from none. Assessed
   zeroes stay out of `with_evidence` and out of every ratio — they explain the
   null, they do not populate it.
+- **Session windows are NOT disjoint, and `trend` must say so.** The evidence
+  producer assigns a bead to every session whose `[started, ended]` contains
+  its transition (section 2). Windows in one workspace overlap routinely — a
+  session left open across a break, a `/clear` that mints a new id while the
+  earlier window stays open, or an `ended` that is only the last transcript
+  entry — so a long session claims the work of every session nested inside it
+  and divides its own cost by an inflated count. Measured across 60 local
+  transcripts on 2026-08-25: windows of 409h and 313h carrying near-zero
+  actual activity. The failure is not loud; it reads as *efficiency*, because
+  the most inflated row is the cheapest per task.
+
+  `trend` therefore computes `window_overlap` per row, lists every affected
+  row under `window_overlaps`, and **excludes overlapped rows from the
+  `per_task` medians** the same way rows without evidence are excluded, with
+  the count named in `per_task_basis`. The focus block carries the row own
+  list plus a caveat on `per_task_basis`, so a per-row ratio cannot be taken
+  at face value.
+
+  Three properties of that calculation, each load-bearing:
+  - It is computed at **read** time, never stored on the row. An enveloping
+    session starts earlier and ends later, so at append time the nested row
+    either sees no envelope row at all or a stale one. Only `trend` sees every
+    row at once, and it recomputes on each call, so it cannot go stale.
+  - It is scoped by **cwd**. Two sessions in different workspaces read
+    different bead databases and cannot be claiming the same task.
+  - An unreadable window yields `null`, not `[]`. That is *unknown* overlap,
+    and it is excluded from the ratios rather than trusted into them — the
+    same absent-is-not-zero rule as everywhere else in this section.
+
+  This is disclosure, not a repair: the assignment itself is still wrong, and
+  genuinely interleaved concurrent sessions can both legitimately fall inside
+  each other windows. Narrowing the join from the window to actual session
+  activity is tracked separately.
 
 ---
 

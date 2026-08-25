@@ -794,6 +794,88 @@ then ok; else bad "trend stayed silent on a metering span with Bedrock-envelope 
 if LASTCALL_LEDGER="$LJ" "$S/ledger.sh" trend | jq -e '
       .meter_regimes.unversioned == 0 and (.meter_regimes.note == null)' >/dev/null 2>&1
 then ok; else bad "trend reported a metering span on a single-version ledger"; fi
+
+# 3d-bis. Window overlap. Session windows in one workspace are NOT disjoint:
+# a session left open across a break, a /clear that mints a new id while the
+# earlier window stays open, or an ended that is only the last transcript
+# entry all yield a long window CONTAINING shorter ones. The evidence producer
+# assigns a bead to every session whose window holds its transition, so the
+# enveloping session claims the work of every session nested inside it and
+# divides its own cost by an inflated count -- which surfaces as apparent
+# efficiency, the cheapest rows being the most inflated. trend cannot fix the
+# assignment, but it must not average those rows into a baseline silently.
+orow() { # sid t0 t1 cwd usd completed
+  jq -cn --arg s "$1" --arg t0 "$2" --arg t1 "$3" --arg c "$4" \
+         --argjson u "$5" --argjson n "$6" \
+    '{schema: "lastcall.ledger/1", session_id: $s, cwd: $c, branch: "main",
+      started: (if $t0 == "" then null else $t0 end), ended: $t1,
+      active_s: 3600, meter_version: 2,
+      dedup: {rid_coverage: 1, mid_coverage: 1},
+      cost: {usd: $u, by_model: [], pricing_source: "t", promo_applied: false,
+             promo_models: [], by_skill: [], caveats: []},
+      tokens: [], work: {tool_calls: 10, files_changed: 1, commits: []},
+      friction: {tool_errors: 0, interrupts: 0, denials: 0},
+      evidence: {sources: ["beads"], completed: $n, partial: 0, blocked: 0,
+                 abandoned: 0, unverified: 0}}'
+}
+LROOT2="$(mktemp -d)"; LJ2="$LROOT2/led"
+# env envelopes a and b; far is disjoint; oth overlaps in TIME but sits in a
+# different workspace, so it reads a different bead database and cannot be
+# claiming the same task.
+{ orow env "2026-08-01T00:00:00Z" "2026-08-01T20:00:00Z" /repo  30 31
+  orow a   "2026-08-01T02:00:00Z" "2026-08-01T04:00:00Z" /repo   4  4
+  orow b   "2026-08-01T06:00:00Z" "2026-08-01T08:00:00Z" /repo   6  3
+  orow far "2026-08-05T00:00:00Z" "2026-08-05T01:00:00Z" /repo   5  2
+  orow oth "2026-08-01T03:00:00Z" "2026-08-01T05:00:00Z" /other  7  2
+} > "$LJ2"
+if LASTCALL_LEDGER="$LJ2" "$S/ledger.sh" trend | jq -e '
+      ([.window_overlaps[].session_id] | sort == ["a","b","env"])
+      and ((.window_overlaps[] | select(.session_id == "env") | .overlaps | sort)
+           == ["a","b"])' >/dev/null 2>&1
+then ok; else bad "trend did not report the enveloping and nested sessions as overlapping"; fi
+# The different-workspace row must NOT be flagged, and must still count.
+if LASTCALL_LEDGER="$LJ2" "$S/ledger.sh" trend | jq -e '
+      ([.window_overlaps[].session_id] | index("oth")) == null' >/dev/null 2>&1
+then ok; else bad "trend flagged an overlap across two different workspaces"; fi
+# Overlapped rows are EXCLUDED from the per-task medians, the same way rows
+# without evidence already are. Only far and oth survive here.
+if LASTCALL_LEDGER="$LJ2" "$S/ledger.sh" trend | jq -e '
+      .per_task.usd_median == 2.5
+      and (.per_task_basis | test("2 row\\(s\\) with completed tasks and a window no other session overlaps"))
+      and (.per_task_basis | test("3 excluded for overlapping"))' >/dev/null 2>&1
+then ok; else bad "trend averaged window-overlapped rows into the per-task median"; fi
+# The envelope divides 30 USD by 31 claimed tasks, so leaving it in would drag
+# the median toward 0.97 -- the double-count showing up as apparent efficiency.
+if LASTCALL_LEDGER="$LJ2" "$S/ledger.sh" trend | jq -e '
+      .per_task.usd_median > 1' >/dev/null 2>&1
+then ok; else bad "the inflated enveloping row reached the per-task median"; fi
+# Focus on the envelope carries the caveat, so a reader cannot take its
+# per-task figure at face value.
+if LASTCALL_LEDGER="$LJ2" "$S/ledger.sh" trend env | jq -e '
+      (.focus.window_overlap | sort == ["a","b"])
+      and (.focus.per_task_basis | test("WINDOW OVERLAP"))' >/dev/null 2>&1
+then ok; else bad "focus on an enveloping session reported its per-task figure with no caveat"; fi
+# A ledger whose windows are all disjoint reports none, and excludes none.
+{ orow p "2026-08-01T00:00:00Z" "2026-08-01T01:00:00Z" /repo 4 2
+  orow q "2026-08-02T00:00:00Z" "2026-08-02T01:00:00Z" /repo 6 2
+} > "$LJ2"
+if LASTCALL_LEDGER="$LJ2" "$S/ledger.sh" trend | jq -e '
+      .window_overlaps == [] and (.per_task_basis | test("0 excluded for overlapping"))
+      and .per_task != null' >/dev/null 2>&1
+then ok; else bad "trend reported an overlap on a ledger with disjoint windows"; fi
+# An unreadable window is UNKNOWN overlap, not disjoint: null rather than [],
+# and excluded from the medians rather than trusted into them.
+{ orow n ""                     "2026-08-01T01:00:00Z" /repo 4 2
+  orow q "2026-08-02T00:00:00Z" "2026-08-02T01:00:00Z" /repo 6 2
+} > "$LJ2"
+if LASTCALL_LEDGER="$LJ2" "$S/ledger.sh" trend n | jq -e '
+      .focus.window_overlap == null
+      and (.focus.per_task_basis | test("unknown"))' >/dev/null 2>&1
+then ok; else bad "a row with an unreadable window did not report its overlap as unknown"; fi
+if LASTCALL_LEDGER="$LJ2" "$S/ledger.sh" trend | jq -e '
+      .per_task_basis | test("1 excluded for an unreadable window")' >/dev/null 2>&1
+then ok; else bad "a row with an unreadable window was counted as having a disjoint one"; fi
+rm -rf "$LROOT2"
 rm -rf "$LROOT"
 
 # 3e. Commit discovery and the match keys. lastcall offers its commit

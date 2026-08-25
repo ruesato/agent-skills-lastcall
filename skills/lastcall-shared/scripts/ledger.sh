@@ -214,12 +214,56 @@ cmd_trend() {
     def pct($p): if length == 0 then null
                  else sort | .[ (((length - 1) * $p) | floor) ] end;
     def r2: if . == null then null else (.*100|round)/100 end;
+    # Timestamps may carry milliseconds, which fromdateiso8601 rejects.
+    def ts: if . == null or . == "" then null
+            else (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) end;
 
-    . as $all
+    . as $all0
+    # Session windows in one workspace are NOT disjoint, and the evidence
+    # producer assigns a bead to every session whose window contains its
+    # transition. So a long session claims the work of every session nested
+    # inside it, and each divides its own cost by its own inflated count.
+    # Three ordinary things produce the long window: a session left open
+    # across a break, a /clear that mints a new id while the earlier window
+    # stays open, and any session whose ended is just the last transcript
+    # entry. Measured across 60 local transcripts, windows of 409h and 313h
+    # exist carrying near-zero actual activity.
+    #
+    # Computed HERE rather than stored on the row, because append time cannot
+    # see it. An enveloping session starts EARLIER and ends LATER, so when the
+    # nested row is written the envelope has no row yet, or a stale row whose
+    # ended has not reached the nested session. Only trend sees every row at
+    # once, and it recomputes on every call so it can never go stale.
+    #
+    # Scoped by cwd: two sessions in different workspaces read different bead
+    # databases and cannot be claiming the same task.
+    | ($all0 | map(. + { _t0: (.started | ts), _t1: (.ended | ts) })) as $stamped
+    | ($stamped | map(
+        . as $r
+        | . + { window_overlap:
+                 # null, not [], when the window is unreadable. That is
+                 # UNKNOWN overlap, and it must not read as "disjoint".
+                 (if $r._t0 == null or $r._t1 == null then null
+                  else [ $stamped[]
+                         | select(.session_id != $r.session_id
+                                  and .cwd == $r.cwd
+                                  and ._t0 != null and ._t1 != null
+                                  and ._t0 <= $r._t1 and ._t1 >= $r._t0)
+                         | .session_id ]
+                  end) }
+        | del(._t0, ._t1))) as $all
+
     # Per-task ratios need evidence. Rows without it stay in the per-session
     # stats but are excluded here — inferring tasks from token burn would
     # reward thrashing.
-    | (map(select(.evidence != null and .evidence.completed > 0))) as $withev
+    | ($all | map(select(.evidence != null and .evidence.completed > 0))) as $withev
+    # And they need a window that is actually this session alone. An
+    # overlapped row counts tasks its neighbours also counted, which shows up
+    # as apparent efficiency — the cheapest rows are the most inflated ones.
+    # Excluded the same way rows without evidence are, rather than silently
+    # averaged in. An unreadable window is excluded too: unknown is not safe.
+    | ($withev | map(select(.window_overlap != null
+                            and (.window_overlap | length) == 0))) as $clean
 
     | { sessions: ($all | length),
         with_evidence: ($withev | length),
@@ -235,10 +279,19 @@ cmd_trend() {
              | pct(0.5) | r2)
         },
 
-        per_task: (if ($withev | length) == 0 then null else {
-          usd_median:        ($withev | map(.cost.usd / .evidence.completed) | pct(0.5) | r2),
-          active_min_median: ($withev | map((.active_s/60) / .evidence.completed) | pct(0.5) | r2)
+        per_task: (if ($clean | length) == 0 then null else {
+          usd_median:        ($clean | map(.cost.usd / .evidence.completed) | pct(0.5) | r2),
+          active_min_median: ($clean | map((.active_s/60) / .evidence.completed) | pct(0.5) | r2)
         } end),
+
+        # Disclosure, not just exclusion. A reader who sees a per_task drawn
+        # from 3 of 12 rows needs to know which 9 were dropped and why, and a
+        # consumer needs it structured rather than parsed out of prose. Empty
+        # when nothing overlaps, so a healthy ledger says so plainly.
+        window_overlaps:
+          ([ $all[]
+             | select(.window_overlap != null and (.window_overlap | length) > 0)
+             | { session_id, cwd, overlaps: .window_overlap } ]),
 
         # A null per_task used to mean three different things at once, and the
         # reader could not tell which: no producer exists in these workspaces,
@@ -252,7 +305,10 @@ cmd_trend() {
           (($all | map(select(.evidence == null)) | length) as $noev
            | ($all | map(select(.evidence != null and .evidence.completed == 0))
                    | length) as $empty
-           | "\($withev|length) row(s) with completed tasks, \($empty) where a producer ran and matched none, \($noev) not assessed"),
+           | ($withev | map(select(.window_overlap != null
+                                    and (.window_overlap | length) > 0)) | length) as $ovl
+           | ($withev | map(select(.window_overlap == null)) | length) as $unk
+           | "\($clean|length) row(s) with completed tasks and a window no other session overlaps, \($ovl) excluded for overlapping another session in the same workspace, \($unk) excluded for an unreadable window, \($empty) where a producer ran and matched none, \($noev) not assessed"),
 
         pricing_sources: ($all | map(.cost.pricing_source) | unique),
 
@@ -321,6 +377,8 @@ cmd_trend() {
           | { focus: {
               session_id: $s.session_id,
               usd: $s.cost.usd,
+              # null means the window was unreadable, so overlap is UNKNOWN.
+              window_overlap: $s.window_overlap,
               vs_median_usd:
                 (($peers | map(.cost.usd) | pct(0.5)) as $m
                  | if $m == null or $m == 0 or ($peers | length) < 5 then null
@@ -337,7 +395,12 @@ cmd_trend() {
                  then "not assessed — no evidence producer ran for this session"
                  elif $s.evidence.completed == 0
                  then "assessed by \($s.evidence.sources | join(", ")) — no completed task matched"
-                 else "\($s.evidence.completed) completed task(s) from \($s.evidence.sources | join(", "))" end)
+                 else "\($s.evidence.completed) completed task(s) from \($s.evidence.sources | join(", "))"
+                      + (if $s.window_overlap == null
+                         then " — this window could not be read, so whether another session overlaps it is unknown"
+                         elif ($s.window_overlap | length) > 0
+                         then " — WINDOW OVERLAP: \($s.window_overlap | length) other session(s) in this workspace run inside this window, so some of these tasks are very likely counted by them too and this ratio understates the true cost per task"
+                         else "" end) end)
             } } end
        end)
   ' "$LEDGER"
