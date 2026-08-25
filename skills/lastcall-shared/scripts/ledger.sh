@@ -82,7 +82,11 @@ evidence_for() {
         partial:    ($t | map(select(.status=="partial"))    | length),
         blocked:    ($t | map(select(.status=="blocked"))    | length),
         abandoned:  ($t | map(select(.status=="abandoned"))  | length),
-        # A completed task with no artifacts is unverified, not counted.
+        # A completed task with no artifacts is unverified. It IS counted in
+        # completed above -- this is a subset of that, not a separate bucket,
+        # and the earlier wording here ("not counted") described an intent the
+        # code did not keep: every per-task ratio divided by completed until
+        # trend was moved onto the grounded denominator below.
         unverified: ($t | map(select(.status=="completed" and ((.artifacts // []) | length) == 0)) | length)
       }' "${ok[@]}"
 }
@@ -264,6 +268,24 @@ cmd_trend() {
     # averaged in. An unreadable window is excluded too: unknown is not safe.
     | ($withev | map(select(.window_overlap != null
                             and (.window_overlap | length) == 0))) as $clean
+    # And the denominator has to be work that can actually be POINTED AT.
+    # evidence_for computes unverified -- a completed task carrying no
+    # artifact -- and the comment beside it has always said such a task is
+    # "not counted", but completed counts it anyway and every ratio here
+    # divided by completed. So the promise was never kept.
+    #
+    # It matters because the two failure modes bias the SAME way. Overlapping
+    # windows inflated the denominator with other sessions beads; ungrounded
+    # completions inflate it with beads nothing points at. Removing the first
+    # concentrates the second, and the signature is a session that closes a
+    # batch of beads at the end with no commit naming any of them.
+    #
+    # A row where nothing is grounded is EXCLUDED, not divided by zero: jq
+    # aborts the whole program on a zero or null denominator, which would cost
+    # the entire trend over one unusable row.
+    | ($clean | map(select((.evidence.unverified // null) != null
+                           and (.evidence.completed - .evidence.unverified) > 0)))
+        as $grounded
 
     | { sessions: ($all | length),
         with_evidence: ($withev | length),
@@ -279,9 +301,28 @@ cmd_trend() {
              | pct(0.5) | r2)
         },
 
-        per_task: (if ($clean | length) == 0 then null else {
-          usd_median:        ($clean | map(.cost.usd / .evidence.completed) | pct(0.5) | r2),
-          active_min_median: ($clean | map((.active_s/60) / .evidence.completed) | pct(0.5) | r2)
+        per_task: (if ($grounded | length) == 0 then null else {
+          # Grounded completions, because a completion with no artifact is the
+          # exact thing the grounding rule exists to distrust, and spending it
+          # in a cost ratio contradicts that rule.
+          usd_median:        ($grounded | map(.cost.usd / (.evidence.completed - .evidence.unverified)) | pct(0.5) | r2),
+          active_min_median: ($grounded | map((.active_s/60) / (.evidence.completed - .evidence.unverified)) | pct(0.5) | r2),
+          denominator: "grounded completions (completed - unverified)",
+          # Beside with_evidence, which counts a different population. The two
+          # sit close together and a reader will pair them, so say which rows
+          # these numbers actually came from.
+          rows: ($grounded | length),
+          # The OTHER bound. Neither denominator is the truth: dividing by
+          # completed treats an unverifiable completion as confirmed, and
+          # dividing by grounded charges the whole session to the subset that
+          # can be pointed at. The real figure is between them, so publish
+          # both rather than folding an unknown into whichever bucket is
+          # convenient -- section 3 forbids exactly that fold. Equal to the
+          # headline when nothing is ungrounded, which is the common case.
+          usd_median_counting_unverified:
+            ($grounded | map(.cost.usd / .evidence.completed) | pct(0.5) | r2),
+          active_min_median_counting_unverified:
+            ($grounded | map((.active_s/60) / .evidence.completed) | pct(0.5) | r2)
         } end),
 
         # Disclosure, not just exclusion. A reader who sees a per_task drawn
@@ -308,7 +349,13 @@ cmd_trend() {
            | ($withev | map(select(.window_overlap != null
                                     and (.window_overlap | length) > 0)) | length) as $ovl
            | ($withev | map(select(.window_overlap == null)) | length) as $unk
-           | "\($clean|length) row(s) with completed tasks and a window no other session overlaps, \($ovl) excluded for overlapping another session in the same workspace, \($unk) excluded for an unreadable window, \($empty) where a producer ran and matched none, \($noev) not assessed"),
+           | ($clean | map(select((.evidence.unverified // null) != null
+                                   and (.evidence.completed - .evidence.unverified) <= 0))
+                     | length) as $nogr
+           | ($clean | map(select((.evidence.unverified // null) == null)) | length) as $unkgr
+           | ($grounded | map(.evidence.completed) | add // 0) as $tot
+           | ($grounded | map(.evidence.unverified) | add // 0) as $ung
+           | "\($grounded|length) row(s) with a grounded completion and a window no other session overlaps, \($ovl) excluded for overlapping another session in the same workspace, \($unk) excluded for an unreadable window, \($nogr) excluded for no grounded completion, \($unkgr) excluded for an unreadable grounding count, \($empty) where a producer ran and matched none, \($noev) not assessed — denominator is grounded completions, \($ung) of \($tot) completions in these rows excluded as unverified"),
 
         pricing_sources: ($all | map(.cost.pricing_source) | unique),
 
@@ -387,8 +434,17 @@ cmd_trend() {
                 (if ($peers | length) < 5
                  then "suppressed — only \($peers|length) other session(s) to compare against"
                  else "median of \($peers|length) other sessions" end),
-              per_task_usd: (if $s.evidence != null and $s.evidence.completed > 0
-                             then ($s.cost.usd / $s.evidence.completed | r2) else null end),
+              # Same denominator as the medians above, or the two are not
+              # comparable. null when nothing in the row is grounded, which is
+              # a real state and not a zero.
+              per_task_usd:
+                (if $s.evidence != null and $s.evidence.unverified != null
+                    and ($s.evidence.completed - $s.evidence.unverified) > 0
+                 then ($s.cost.usd / ($s.evidence.completed - $s.evidence.unverified) | r2)
+                 else null end),
+              per_task_usd_counting_unverified:
+                (if $s.evidence != null and $s.evidence.completed > 0
+                 then ($s.cost.usd / $s.evidence.completed | r2) else null end),
               # Same three-way split as per_task_basis above, for the one row.
               per_task_basis:
                 (if $s.evidence == null
@@ -396,6 +452,13 @@ cmd_trend() {
                  elif $s.evidence.completed == 0
                  then "assessed by \($s.evidence.sources | join(", ")) — no completed task matched"
                  else "\($s.evidence.completed) completed task(s) from \($s.evidence.sources | join(", "))"
+                      + (if $s.evidence.unverified == null
+                         then " — grounding was not recorded for this row, so the per-task figure divides by every completion"
+                         elif $s.evidence.unverified >= $s.evidence.completed
+                         then " — NONE of them grounded: no commit or artifact points at any, so no per-task figure is reported"
+                         elif $s.evidence.unverified > 0
+                         then " — \($s.evidence.unverified) of them unverified (no artifact points at the task), so the per-task figure divides by the \($s.evidence.completed - $s.evidence.unverified) that are grounded"
+                         else "" end)
                       + (if $s.window_overlap == null
                          then " — this window could not be read, so whether another session overlaps it is unknown"
                          elif ($s.window_overlap | length) > 0

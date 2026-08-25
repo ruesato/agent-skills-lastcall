@@ -642,6 +642,22 @@ discovers the session commits itself, and writes one file per run:
   nothing. Absence is the normal case. **This is not the same state as running
   and matching nothing**, and the two must not arrive at a consumer looking
   alike — see the marker rule below.
+- **Evidence files are per-window and NOT mutually exclusive.** The producer
+  assigns a bead to every session whose window contains its transition, and
+  session windows in one workspace overlap routinely (section 3). Only `trend`
+  compensates, and it compensates for its own medians alone — **anything
+  reading the drop-box directly still sees the double-claim.** On one reported
+  corpus, 127 task entries across the evidence files carried 84 distinct bead
+  ids: 37 ids appeared in more than one file and 6 appeared in three, so
+  summing `completed` across sessions overstated by roughly 1.5x. A
+  cost-per-feature rollup built over the files counted 13 tasks for a piece of
+  work whose true distinct count was 7.
+
+  So: **a cross-row consumer MUST dedupe on `task.id` before counting.** The
+  dedupe rule already exists for the several-files-per-session case in "Rules
+  for consumers"; what was missing is the statement that it applies *across
+  sessions* too. Cost is unaffected and needs no dedupe — it is per session,
+  and both sessions are real spend. It is only the task count that inflates.
 - **A run that matches no bead still writes its file, with `tasks: []`.** That
   empty document is the difference between *this producer does not apply here*
   (no file at all) and *it applied and found nothing* (a file with no tasks).
@@ -951,6 +967,38 @@ build one from.
   genuinely interleaved concurrent sessions can both legitimately fall inside
   each other windows. Narrowing the join from the window to actual session
   activity is tracked separately.
+- **The per-task denominator is GROUNDED completions, not every completion.**
+  `evidence_for` computes `unverified` — a completed task carrying no artifact
+  — and it is a *subset* of `completed`, not a separate bucket. Until 0.6.2
+  every ratio divided by `completed`, so an unverifiable completion was spent
+  as though it were confirmed.
+
+  This matters because the two denominator inflations bias the **same way**.
+  Overlapping windows filled the denominator with other sessions' beads;
+  ungrounded completions fill it with beads nothing points at. Excluding the
+  overlapped rows removes the first source and *concentrates* the second — on
+  one reported corpus the surviving three rows were the three worst-grounded
+  in the ledger, and the median fell to 27% of its prior value, reading as an
+  efficiency gain that had not happened. The signature is a session that
+  closes a batch of beads at the end with no commit naming any of them.
+
+  `trend` therefore divides by `completed - unverified`, and **publishes both
+  bounds**: `usd_median` on the grounded denominator, and
+  `usd_median_counting_unverified` on the raw one. Neither is the truth —
+  dividing by `completed` treats an unverifiable completion as confirmed, and
+  dividing by grounded charges the whole session to the subset that can be
+  pointed at. The real figure lies between them, so folding the unknown
+  silently into either bucket is exactly what the rule above forbids. The
+  headline is the grounded one because a completion with no artifact is the
+  precise thing the grounding rule exists to distrust.
+
+  Two exclusions follow, both counted in `per_task_basis`: a row where every
+  completion is ungrounded (`completed - unverified == 0`) is dropped rather
+  than divided by zero — jq aborts the whole program on a zero or null
+  denominator, which would cost the entire trend over one unusable row — and a
+  row that never recorded `unverified` is *unknown*, not fully grounded.
+  `per_task.rows` names the surviving population, because `with_evidence`
+  counts a different one and sits close enough in the output to be misread.
 
 ---
 

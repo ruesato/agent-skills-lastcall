@@ -841,7 +841,7 @@ then ok; else bad "trend flagged an overlap across two different workspaces"; fi
 # without evidence already are. Only far and oth survive here.
 if LASTCALL_LEDGER="$LJ2" "$S/ledger.sh" trend | jq -e '
       .per_task.usd_median == 2.5
-      and (.per_task_basis | test("2 row\\(s\\) with completed tasks and a window no other session overlaps"))
+      and (.per_task_basis | test("2 row\\(s\\) with a grounded completion and a window no other session overlaps"))
       and (.per_task_basis | test("3 excluded for overlapping"))' >/dev/null 2>&1
 then ok; else bad "trend averaged window-overlapped rows into the per-task median"; fi
 # The envelope divides 30 USD by 31 claimed tasks, so leaving it in would drag
@@ -876,6 +876,89 @@ if LASTCALL_LEDGER="$LJ2" "$S/ledger.sh" trend | jq -e '
       .per_task_basis | test("1 excluded for an unreadable window")' >/dev/null 2>&1
 then ok; else bad "a row with an unreadable window was counted as having a disjoint one"; fi
 rm -rf "$LROOT2"
+
+# 3d-ter. The DENOMINATOR has to be grounded work. evidence_for computes
+# unverified -- a completed task carrying no artifact -- and the comment beside
+# it has always said such a task is "not counted", but completed counts it and
+# every per-task ratio divided by completed, so the promise was never kept.
+#
+# It matters because the two denominator inflations bias the SAME way: the
+# window overlap filled it with other sessions beads, and removing that only
+# concentrates the ungrounded ones. The signature is a session that closes a
+# batch of beads at the end with no commit naming any of them.
+#
+# Nothing here asserted this before, so per_task could ignore unverified
+# entirely and stay green. These fixtures close that.
+grow() { # sid t0 t1 cwd usd active_min completed unverified
+  jq -cn --arg s "$1" --arg t0 "$2" --arg t1 "$3" --arg c "$4" \
+         --argjson u "$5" --argjson am "$6" --argjson n "$7" --argjson v "$8" \
+    '{schema: "lastcall.ledger/1", session_id: $s, cwd: $c, branch: "main",
+      started: $t0, ended: $t1, active_s: ($am * 60), meter_version: 2,
+      dedup: {rid_coverage: 1, mid_coverage: 1},
+      cost: {usd: $u, by_model: [], pricing_source: "t", promo_applied: false,
+             promo_models: [], by_skill: [], caveats: []},
+      tokens: [], work: {tool_calls: 10, files_changed: 1, commits: []},
+      friction: {tool_errors: 0, interrupts: 0, denials: 0},
+      evidence: {sources: ["beads"], completed: $n, partial: 0, blocked: 0,
+                 abandoned: 0, unverified: $v}}'
+}
+LROOT3="$(mktemp -d)"; LJ3="$LROOT3/led"
+# Disjoint windows in one workspace, so the overlap filter excludes nothing and
+# grounding is the only thing under test. Ratios: 4.48/1, 54.12/3, 41.14/3
+# -> 4.48, 18.04, 13.71, median 13.71. Dividing by completed instead gives
+# 0.75, 1.93, 5.88, median 1.93 -- a 7.1x difference, so the assertion cannot
+# pass by accident.
+{ grow a "2026-08-01T00:00:00Z" "2026-08-01T01:00:00Z" /w1  4.48  22  6  5
+  grow b "2026-08-02T00:00:00Z" "2026-08-02T02:00:00Z" /w1 54.12 109 28 25
+  grow c "2026-08-03T00:00:00Z" "2026-08-03T02:00:00Z" /w1 41.14  82  7  4
+} > "$LJ3"
+if LASTCALL_LEDGER="$LJ3" "$S/ledger.sh" trend | jq -e '
+      .per_task.usd_median == 13.71
+      and .per_task.usd_median_counting_unverified == 1.93' >/dev/null 2>&1
+then ok; else bad "per_task divided by every completion instead of the grounded ones"; fi
+# Both bounds are published. Neither denominator is the truth -- dividing by
+# completed treats an unverifiable completion as confirmed, dividing by
+# grounded charges the whole session to the subset that can be pointed at --
+# so folding the unknown into either one silently is the thing section 3
+# forbids. rows names the population, because with_evidence counts a
+# different one and sits close enough to be misread as this one.
+if LASTCALL_LEDGER="$LJ3" "$S/ledger.sh" trend | jq -e '
+      .per_task.rows == 3 and (.per_task.denominator | test("grounded"))
+      and (.per_task_basis | test("34 of 41 completions in these rows excluded as unverified"))' >/dev/null 2>&1
+then ok; else bad "trend did not disclose the grounded denominator or the excluded completions"; fi
+# A row where every completion is ungrounded is EXCLUDED, never divided by
+# zero: jq aborts the whole program on a zero denominator, which would cost
+# the entire trend over one unusable row.
+{ grow a "2026-08-01T00:00:00Z" "2026-08-01T01:00:00Z" /w1 4.48 22 6 5
+  grow z "2026-08-04T00:00:00Z" "2026-08-04T01:00:00Z" /w1 9.00 30 4 4
+} > "$LJ3"
+if LASTCALL_LEDGER="$LJ3" "$S/ledger.sh" trend | jq -e '
+      .per_task.rows == 1 and .per_task.usd_median == 4.48
+      and (.per_task_basis | test("1 excluded for no grounded completion"))' >/dev/null 2>&1
+then ok; else bad "a row with no grounded completion was not excluded from the per-task median"; fi
+if LASTCALL_LEDGER="$LJ3" "$S/ledger.sh" trend z | jq -e '
+      .focus.per_task_usd == null
+      and (.focus.per_task_basis | test("NONE of them grounded"))' >/dev/null 2>&1
+then ok; else bad "focus on a row with no grounded completion reported a per-task figure anyway"; fi
+# The focus figure uses the SAME denominator as the medians, or the two are
+# not comparable, and it says how many it dropped.
+{ grow b "2026-08-02T00:00:00Z" "2026-08-02T02:00:00Z" /w1 54.12 109 28 25; } > "$LJ3"
+if LASTCALL_LEDGER="$LJ3" "$S/ledger.sh" trend b | jq -e '
+      .focus.per_task_usd == 18.04
+      and .focus.per_task_usd_counting_unverified == 1.93
+      and (.focus.per_task_basis | test("25 of them unverified"))' >/dev/null 2>&1
+then ok; else bad "focus per-task figure did not use the grounded denominator"; fi
+# A row that never recorded a grounding count is UNKNOWN, not fully grounded.
+# jq aborts on number-minus-null, so this also pins that trend survives it.
+{ grow a "2026-08-01T00:00:00Z" "2026-08-01T01:00:00Z" /w1 4.48 22 6 5
+  grow u "2026-08-05T00:00:00Z" "2026-08-05T01:00:00Z" /w1 8.00 20 4 0
+} > "$LJ3"
+jq -c 'if .session_id == "u" then .evidence |= del(.unverified) else . end' "$LJ3" > "$LJ3.x" && mv "$LJ3.x" "$LJ3"
+if LASTCALL_LEDGER="$LJ3" "$S/ledger.sh" trend | jq -e '
+      .per_task.rows == 1
+      and (.per_task_basis | test("1 excluded for an unreadable grounding count"))' >/dev/null 2>&1
+then ok; else bad "a row with no recorded grounding count was treated as fully grounded"; fi
+rm -rf "$LROOT3"
 rm -rf "$LROOT"
 
 # 3e. Commit discovery and the match keys. lastcall offers its commit
