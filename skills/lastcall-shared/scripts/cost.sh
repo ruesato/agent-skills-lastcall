@@ -298,4 +298,24 @@ jq -s --slurpfile r "$RATES" --argjson drift "$DRIFT_PCT" '
     + (if $tcarry  == null then {} else { thinking_carry_usd: $tcarry } end)
     + (if $reest   == null then {} else { cache_reestablish: $reest } end)
     + (if $toolctx == null then {} else { tool_context: $toolctx } end)
+
+  # A stub meter read no transcript, so it carries no token rows — and an empty
+  # token list prices to exactly $0.00, which is the one answer this must never
+  # give. Zero is a measurement; this session has none. Every figure derived
+  # from tokens is therefore nulled out rather than reported, and the reason
+  # leads the caveats so a reader who only skims that list still sees it.
+  #
+  # Deliberately a post-pass over the normal program rather than an early
+  # return: pricing_source, and anything else that does not come from the token
+  # rows, is still correct and still worth carrying.
+  | (if ($m.stub // null) == null then . else
+       .total_usd      = null
+     | .by_bucket     |= with_entries(.value = null)
+     | .promo_applied  = null
+     | .thinking_tokens = null
+     | .server_tools  |= with_entries(.value = null)
+     | .caveats        = ([ "no transcript was read (\($m.stub.reason)), so every token count for this session is UNMEASURED — not zero. There is no cost figure for it." ]
+                          + .caveats)
+     | . + { stub: $m.stub }
+     end)
 ' -

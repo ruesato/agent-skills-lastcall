@@ -66,6 +66,11 @@ cd agent-skills-lastcall
 ~/.lastcall/bin/meter-session.sh
 ```
 
+Kiro writes no Claude Code transcripts and sets no session id, so step 3 there
+prints a **stub** — a JSON document of the normal shape with every measurement
+`null` and a `stub` block saying why. That is the expected result, not a
+failure: see "When there is no transcript" below for what still works.
+
 The skills appear in Kiro's **Agent Steering & Skills** panel and are
 invocable with `/lastcall` and `/tally`. `lastcall-shared` is a file
 container, not invocable.
@@ -98,6 +103,27 @@ Four things silently corrupt session totals, and the meter handles each:
   differently, so cache writes are never collapsed into one number.
 - Wall-clock time is meaningless for a resumed session, which can span days.
   Active time is computed by gap bucketing instead.
+
+### When there is no transcript
+
+The meter emits a **stub** rather than failing when it cannot find one: the same
+document shape, every measurement `null`, and a top-level `stub` block giving
+the reason. `null` means *unmeasured*, never zero — a stub reporting `active_s:
+0` would say the session did nothing, which is a false statement rather than a
+missing one.
+
+This is the ordinary path in Kiro, and it also covers a transcript the harness
+has rotated away, a session too new to have been flushed, and a session id that
+does not resolve.
+
+What still works, because it never came from the transcript in the first place:
+open loops (branch, uncommitted files, TODOs added, churn availability) and the
+evidence drop-box, and with them the commit, memories, report and tracker
+delegations. What does not: cost, tokens, active time and friction are reported
+as unmeasured, and no ledger row is written — a row with no measurements in it
+would poison the baseline rather than extend it.
+
+Set `LASTCALL_REQUIRE_TRANSCRIPT=1` to get the old hard failure back.
 
 Every claim in a summary must trace to an artifact — a file path, a commit SHA,
 a task id, a test result. Transcripts are full of intentions that never landed,

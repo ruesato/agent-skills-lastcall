@@ -7,6 +7,11 @@
 #
 # No pricing here on purpose — rates come from the claude-api skill downstream,
 # so this stays correct when prices change.
+#
+# With no transcript to read it emits a STUB rather than failing: same document
+# shape, every measurement null, a `stub` block at the top level saying why.
+# Set LASTCALL_REQUIRE_TRANSCRIPT=1 to get the hard failure back. See the stub
+# emitter below and contracts.md section 1.
 set -euo pipefail
 
 ROOT="${CLAUDE_PROJECTS:-$HOME/.claude/projects}"
@@ -68,14 +73,26 @@ newest_jsonl() {
 # Resolution order matters. Falling back to "newest transcript" picks the WRONG
 # session whenever two sessions share a project directory, which is common —
 # so an explicitly supplied id, and then CLAUDE_SESSION_ID, both win over it.
+#
+# The last rung is the STUB identity, used when no id is available from any
+# source — the Kiro case, where nothing sets CLAUDE_SESSION_ID and there is no
+# transcript tree to pick a newest file out of. It is derived from $PWD rather
+# than generated so that a producer writing into the evidence drop-box and this
+# script reading it arrive at the same id with no handshake between them. The
+# cost of that choice is stated where it bites: contracts.md section 2.
+STUB_REASON=""
 if [ $# -ge 1 ]; then
   SID="$1"
+  ID_SOURCE=argument
 elif [ -n "${CLAUDE_SESSION_ID:-}" ]; then
   SID="$CLAUDE_SESSION_ID"
+  ID_SOURCE=environment
+elif [ -d "$PROJ" ] && SID="$(newest_jsonl "$PROJ")" && [ -n "$SID" ]; then
+  ID_SOURCE=newest
 else
-  [ -d "$PROJ" ] || { echo "no transcripts for $PWD" >&2; exit 1; }
-  SID=$(newest_jsonl "$PROJ")
-  [ -n "$SID" ] || { echo "no transcripts in $PROJ" >&2; exit 1; }
+  SID="stub$(slug "$PWD")"
+  ID_SOURCE=cwd
+  STUB_REASON="no session id was available and no transcript directory exists for $PWD under $ROOT"
 fi
 
 # A session keeps writing to the project directory it STARTED in, so renaming
@@ -99,7 +116,27 @@ for d in "$ROOT"/*/; do
     [ -f "$sf" ] && SUBS+=("$sf")
   done
 done
-[ ${#MAINS[@]} -gt 0 ] || { echo "no transcript for $SID under $ROOT" >&2; exit 1; }
+# No transcript anywhere. This used to exit 1, and every stage downstream then
+# failed transitively — the whole wrap-up died over the one input that is
+# missing by construction on a host Claude Code does not write transcripts for.
+# So emit a STUB instead: a document of the same shape carrying no measurements,
+# marked as such at the top level. See the stub emitter at the bottom of this
+# file for what it does and does not claim.
+#
+# Loudness is preserved without the exit code, which is the part that mattered:
+# the warning below, the `stub` block, and cost.sh refusing to produce a total.
+# LASTCALL_REQUIRE_TRANSCRIPT=1 restores the hard failure for a caller that
+# wants a measurement or nothing.
+STUB=0
+if [ ${#MAINS[@]} -eq 0 ]; then
+  [ -n "$STUB_REASON" ] || STUB_REASON="no transcript for $SID under $ROOT"
+  if [ "${LASTCALL_REQUIRE_TRANSCRIPT:-0}" = "1" ]; then
+    echo "meter: $STUB_REASON" >&2
+    exit 1
+  fi
+  STUB=1
+  echo "meter: $STUB_REASON — emitting a stub; nothing in this session is metered" >&2
+fi
 
 # Optional: the statusLine capture written by capture-statusline.sh. It is the
 # only local source for rate_limits, which appear nowhere in a transcript, plus
@@ -150,6 +187,48 @@ if [ -f "$CAPFILE" ]; then
                     and .payload.session_id == $sid)) | first // empty' \
         "$CAPFILE" 2>/dev/null)" || CAP=null
   [ -n "$CAP" ] || CAP=null
+fi
+
+# ------------------------------------------------------------------ stub
+# Same document shape, no measurements. Every count that a real run would
+# derive from the transcript is null here, and null means UNMEASURED — the same
+# rule contracts.md invariant 11 applies to `native`, applied to the whole
+# document. The two exceptions are deliberate:
+#
+#   work.files {}         — an object, because openloops.sh iterates it, and {}
+#                           is already the shape that means "unmeasured" there.
+#   files_coverage.attributed false
+#                         — set EXPLICITLY, never omitted. openloops.sh defaults
+#                           churn_available to true when files_coverage is
+#                           absent, because absence there means "output from an
+#                           older meter" rather than "nothing was attributed".
+#                           A stub that left the field out would claim the
+#                           struggle signal was measured when it was not.
+#
+# The evidence drop-box is carried through, so the open-loop report, and the
+# commit / memories / tracker delegations that read it, survive on a host with
+# no transcripts at all. That is the whole point of the stub.
+#
+# No `native` block, even when a statusLine capture happens to exist for this
+# id: every figure in it is only meaningful beside the transcript-derived one it
+# is a cross-check on, and there is no such figure here.
+if [ "$STUB" = 1 ]; then
+  jq -n --arg sid "$SID" --arg cwd "$PWD" --arg reason "$STUB_REASON" \
+        --arg idsrc "$ID_SOURCE" --argjson ev "$EV" --argjson mver "$METER_VERSION" '
+    { stub: { reason: $reason, id_source: $idsrc },
+      session: { id: $sid, meter_version: $mver, cwd: $cwd, branch: null,
+                 started: null, ended: null, wall_s: null, active_s: null,
+                 agent_s: null, agent_turns: null, ai_title: null,
+                 effort: null, dedup: null },
+      tokens: [], agents: [],
+      work: { tools: {}, files: {},
+              files_coverage: { edit_tool_calls: null, bash_calls: null,
+                                attributed: false },
+              skills: [], skill_load: [] },
+      context: null,
+      friction: { tool_errors: null, interrupts: null, denials: null },
+      evidence: $ev }'
+  exit 0
 fi
 
 # Subagent identities, from the .meta.json sidecars.

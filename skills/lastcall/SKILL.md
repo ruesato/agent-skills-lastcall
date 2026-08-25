@@ -254,6 +254,21 @@ gives a different (larger) number that will not match what the user approved.
 
 If the meter exits non-zero, report stderr verbatim and stop. Do not estimate.
 
+**If the output carries a top-level `stub` block, there was no transcript to
+read.** Keep going — that is what the stub is for. Everything from step 3 on
+still works, because open loops, the evidence drop-box and every delegation read
+git and the drop-box rather than the transcript. What changes:
+
+- Say once, plainly, that this session was **not metered** and why (`stub.reason`).
+- Report **no** cost, token, time or friction figures. They are unmeasured, not
+  zero, and `cost.sh` returns `total_usd: null` for exactly that reason. Do not
+  fill the gap with an estimate.
+- Step 7 writes no ledger row; `ledger.sh` declines it and says so. Report that
+  rather than treating it as a failure.
+- Evidence found under a stub id is scoped to the **directory**, not to this
+  session, so describe it as outstanding work here rather than as work this
+  session did.
+
 ## 2. Cost
 
 ```bash
@@ -643,6 +658,12 @@ second run is free.
 delegation produced and they are unioned in, but the row no longer depends on
 it: before discovery, a clean-tree session recorded an empty commit list and
 every task in it read as unverified.
+
+**On a stub meter this step writes nothing, by design.** Both scripts decline
+and say so on stderr: there is no session window to match beads against, and a
+row with no measurements in it would poison the baseline it was added to rather
+than extend it. Report that the session was not metered and move on — it is not
+a failure to retry.
 
 The ledger is **keyed on `session_id` alone** and replaces that session's row in
 place, so re-running never appends a duplicate. Written by `lastcall` only —

@@ -242,6 +242,72 @@ Written by `capture-statusline.sh`, read by the meter. One file per session:
 unparseable file as absent. The capture is opt-in and `install.sh` never
 configures it — see the README for why.
 
+### The stub document
+
+When there is no transcript to read, the meter emits a **stub** rather than
+exiting non-zero. Not a fallback for Kiro alone: it covers a transcript the
+harness has rotated away (measured 2026-08-22, five of eight ledger rows had
+none left on disk), a session too new to have been flushed, and a session id
+that does not resolve.
+
+```jsonc
+{
+  "stub": {
+    "reason":    "no session id was available and no transcript directory exists for ...",
+    "id_source": "cwd"     // "argument" | "environment" | "newest" | "cwd"
+  },
+  "session": { "id": "stub-Users-you-code-project", "cwd": "/Users/you/code/project",
+               "meter_version": 2,
+               "branch": null, "started": null, "ended": null,
+               "wall_s": null, "active_s": null, "agent_s": null,
+               "agent_turns": null, "ai_title": null,
+               "effort": null, "dedup": null },
+  "tokens": [], "agents": [], "context": null,
+  "work": { "tools": {}, "files": {},
+            "files_coverage": { "edit_tool_calls": null, "bash_calls": null,
+                                "attributed": false },
+            "skills": [], "skill_load": [] },
+  "friction": { "tool_errors": null, "interrupts": null, "denials": null },
+  "evidence": [ /* the drop-box, read as normal */ ]
+}
+```
+
+**`null` here means unmeasured, exactly as it does for `native`** (invariant 11)
+— extended from one block to the whole document. A stub reporting `active_s: 0`
+would say the session did nothing, which is a confident false statement rather
+than a missing one.
+
+Two fields are not null, and both on purpose:
+
+- **`work.files` is `{}`**, because `openloops.sh` iterates it and `{}` is
+  already the shape that means unmeasured there, given the flag below.
+- **`work.files_coverage.attributed` is `false`, explicitly, never omitted.**
+  `openloops.sh` defaults `churn_available` to `true` when `files_coverage` is
+  absent, because absence means *output from an older meter*, not *nothing was
+  attributed*. A stub that left the field out would claim the struggle signal
+  was measured when nothing was. This is invariant 10 at its limit — "an empty
+  `work.files` is not a claim that nothing was edited" — not a new concept.
+
+No `native` block, even when a statusLine capture happens to exist for the id:
+every figure in it is a cross-check on a transcript-derived figure, and there is
+none here.
+
+Consumers:
+
+- `openloops.sh` needs only `session.cwd`, `work.files`,
+  `work.files_coverage.attributed` and `evidence`, all of which a stub carries,
+  so the open-loop report is **unaffected** — branch, dirty paths, TODO scan and
+  uncommitted files all come from git rather than from the meter.
+- `cost.sh` nulls `total_usd` and every token-derived figure and leads its
+  `caveats` with the reason. An empty token list otherwise prices to exactly
+  $0.00, which is the one answer it must never give.
+- `ledger.sh append` **refuses the row** — see section 3.
+- `emit-evidence-beads.sh` exits 0 with a message: the session window is what
+  joins a bead to this session, and a stub has none.
+
+`LASTCALL_REQUIRE_TRANSCRIPT=1` restores the hard failure for a caller that
+wants a measurement or nothing.
+
 ### Invariants the meter guarantees
 
 Each of these silently corrupts totals if a reimplementation drops it:
@@ -434,6 +500,30 @@ one drops the other. And `claude --worktree` sets cwd to
 `.claude/worktrees/<name>`, which slugs to a different project directory than
 the repository root, so a worktree session and its evidence can never meet.
 
+### When there is no session id
+
+Kiro has none: nothing there sets `CLAUDE_SESSION_ID` and there is no transcript
+tree to read one out of. The meter falls back to a **cwd-derived id**,
+`stub` + the project-directory slug of `$PWD` — `stub-Users-you-code-project`.
+
+Derived rather than generated, because a generated id could not be guessed by
+anyone else. A producer writing evidence and `lastcall` reading it have no
+channel to agree on an identity through, so the identity has to be something
+both can compute from what they already have. `$PWD` is the only such thing.
+
+**Its cost, stated plainly: this id is a rendezvous point, not a session
+identity.** It is stable across runs in a directory, so a stub session picks up
+evidence left by *earlier* stub sessions in that same directory. There is no
+window to bound it with — a stub has no `started`/`ended` — so nothing filters
+it, and a consumer must read such evidence as "outstanding in this directory"
+rather than "done in this session". It is also why `ledger.sh` refuses a stub
+row: rows are replaced on session id alone, so a second stub session would
+overwrite the first (section 3).
+
+A producer that *does* know a real session id should always use it. The fallback
+is for producers that have nothing better, and it must be computed the same way
+— `sed 's|[^a-zA-Z0-9-]|-|g'` over `$PWD`, prefixed with `stub`.
+
 The drop-box also lives under a directory `lastcall` owns rather than inside the
 Claude Code transcript tree. That tree is managed and rotated by the harness —
 measured 2026-08-22, five of eight ledger rows already had no transcript left on
@@ -582,6 +672,21 @@ sessions give you a baseline to compare against.
 
 Global across projects, with `cwd` as a filterable field. Written by
 `lastcall` only — `tally` never writes.
+
+**A stub meter never becomes a row.** `append` reads the `stub` marker from
+contract 1 and exits 0 with a message, writing nothing, because a stub carries
+nothing a baseline is built out of — no cost, no active time, no token rows.
+Storing it anyway would do two separate kinds of damage. It would poison
+`trend`, whose medians take `.cost.usd` and `.active_s / 60` straight off every
+row: a `null` sorts below every number in jq, and `null` divided by a number
+aborts the program outright. And it would destroy history, because rows are
+replaced on `session_id` alone and a stub id is derived from the working
+directory (section 2) — the second stub session in a directory would silently
+overwrite the first.
+
+A host with no transcripts therefore gets open loops, evidence and the
+delegations, but no baseline. That is the honest outcome: there is nothing to
+build one from.
 
 ### Shape
 

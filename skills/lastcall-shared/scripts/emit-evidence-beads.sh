@@ -54,6 +54,16 @@ ended="$(printf '%s' "$meter" | jq -r '.session.ended // empty')"
 
 [ -n "$sid" ] || { echo "emit-evidence-beads: no session id on stdin" >&2; exit 1; }
 
+# A stub meter carries no session window, and the window is what joins a bead to
+# this session — without it every bead in the workspace would qualify. Said out
+# loud rather than falling through to the silent `started`/`ended` exit below,
+# because on a host with no transcripts that path is taken every single run and
+# silence there reads as "the workspace has no beads".
+if printf '%s' "$meter" | jq -e '.stub != null' >/dev/null 2>&1; then
+  echo "emit-evidence-beads: stub meter (no transcript) — no session window to match beads against, nothing emitted" >&2
+  exit 0
+fi
+
 # The recorded cwd goes STALE. A session keeps the path it started in, so a
 # directory rename leaves every later row pointing at a directory that no longer
 # exists — measured on this machine, 5 of 26 sessions carry a stale cwd, and

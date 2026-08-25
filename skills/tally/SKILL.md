@@ -56,6 +56,12 @@ meter instead of the current one.
 If the meter exits non-zero, report the stderr verbatim and stop. Do not
 estimate numbers it failed to produce.
 
+**A top-level `stub` block means there was no transcript to read** — the normal
+case in Kiro, and what a rotated-away transcript looks like anywhere. Do not
+print the readout in step 3: every figure in it would be a zero standing in for
+something unmeasured. Say instead that this session cannot be metered, give
+`stub.reason`, and stop there.
+
 ### 2. Read the output
 
 The shape is specified in `../lastcall-shared/references/contracts.md` section 1.

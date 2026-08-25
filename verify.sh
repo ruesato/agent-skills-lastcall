@@ -282,9 +282,20 @@ jq -cn --arg cwd "$PWD" '{sessionId: "fixture-renamed", cwd: $cwd,
 if CLAUDE_PROJECTS="$FROOT" "$S/meter-session.sh" fixture-renamed 2>/dev/null \
      | jq -e '.session.id == "fixture-renamed"' >/dev/null 2>&1
 then ok; else bad "meter cannot resolve a transcript under a renamed project dir"; fi
-# The same lookup must still fail loudly for an id that exists nowhere.
-if CLAUDE_PROJECTS="$FROOT" "$S/meter-session.sh" fixture-absent >/dev/null 2>&1
-then bad "meter succeeded on a nonexistent session id"; else ok; fi
+# The same lookup must still be LOUD about an id that exists nowhere. It used to
+# assert a non-zero exit; it now asserts a stub, because the exit code stopped
+# being the way that is said — see the stub block in meter-session.sh. What the
+# check is really protecting is unchanged: a failed resolution must never come
+# back looking like a measurement. A stub cannot be mistaken for one, since
+# every count in it is null and cost.sh refuses to produce a total.
+if CLAUDE_PROJECTS="$FROOT" "$S/meter-session.sh" fixture-absent 2>/dev/null \
+     | jq -e '.stub != null and .session.id == "fixture-absent" and (.tokens | length) == 0' \
+     >/dev/null 2>&1
+then ok; else bad "meter did not emit a stub for a nonexistent session id"; fi
+# And a caller that wants a measurement or nothing can still demand one.
+if CLAUDE_PROJECTS="$FROOT" LASTCALL_REQUIRE_TRANSCRIPT=1 \
+     "$S/meter-session.sh" fixture-absent >/dev/null 2>&1
+then bad "LASTCALL_REQUIRE_TRANSCRIPT did not restore the hard failure"; else ok; fi
 
 # 2b. That rename can also SPLIT one session across two project dirs under the
 # same id, and resolution that stops at the first match drops the other part
@@ -315,6 +326,71 @@ then ok; else bad "meter dropped part of a session split across two project dirs
 if printf '%s' "$split_out" | jq -e --arg c "$PWD" '.session.cwd == $c' >/dev/null 2>&1
 then ok; else bad "meter reported the pre-rename cwd for a split session"; fi
 rm -rf "$FROOT"
+
+# 2c. NO transcript at all, and no session id from anywhere. On Kiro that is the
+# ordinary path rather than an edge case — nothing there writes a transcript and
+# nothing sets CLAUDE_SESSION_ID — and the sweep above structurally cannot reach
+# it, since every session it finds has a transcript by construction. It also
+# covers a transcript the harness has rotated away, which does happen: measured
+# 2026-08-22, five of eight ledger rows had no transcript left on disk.
+SROOT="$(mktemp -d "$TMP/lastcall-stub.XXXXXX")"
+SEV="$SROOT/evidence"
+mkdir -p "$SROOT/work"
+stub_meter() { ( cd "$SROOT/work" && CLAUDE_PROJECTS="$SROOT/none" \
+                 LASTCALL_EVIDENCE_DIR="$SEV" "$S/meter-session.sh" 2>/dev/null ); }
+sm="$(stub_meter)"
+# The fields openloops.sh reads, plus the marker that says why they are empty.
+# attributed must be present and FALSE, never absent — absence there means
+# "output from an older meter", and openloops then defaults churn_available to
+# true, claiming the struggle signal was measured when nothing was.
+if printf '%s' "$sm" | jq -e --arg w "$SROOT/work" '
+      .stub.id_source == "cwd" and .session.cwd == $w
+      and .work.files == {} and .work.files_coverage.attributed == false' >/dev/null 2>&1
+then ok; else bad "stub meter is missing the fields openloops reads"; fi
+# Unmeasured, not zero. A stub reporting active_s 0 would read as a session in
+# which nothing happened, which is a confident false statement.
+if printf '%s' "$sm" | jq -e '.session.active_s == null and .session.wall_s == null
+      and .friction.tool_errors == null' >/dev/null 2>&1
+then ok; else bad "stub meter reported zeroes where it measured nothing"; fi
+# An empty token list prices to exactly $0.00, which is the one answer cost.sh
+# must never give here.
+sc="$(printf '%s' "$sm" | "$S/cost.sh" 2>/dev/null)"
+if printf '%s' "$sc" | jq -e '.total_usd == null
+      and ([.by_bucket[] | select(. != null)] | length) == 0
+      and ([.caveats[] | select(test("UNMEASURED"))] | length) == 1
+      and (.pricing_source | type == "string")' >/dev/null 2>&1
+then ok; else bad "cost on a stub reported a figure instead of unmeasured"; fi
+# The point of the whole exercise: open loops still work with no transcript.
+so="$(printf '%s' "$sm" | "$S/openloops.sh" 2>/dev/null)"
+if printf '%s' "$so" | jq -e '.churn_available == false
+      and .git.available == false' >/dev/null 2>&1
+then ok; else bad "openloops did not run on a stub meter"; fi
+# The baseline must not absorb a row with no measurements in it — see the
+# refusal in ledger.sh for the two ways that goes wrong.
+if printf '%s' "$sm" | LASTCALL_LEDGER="$LEDGER.stub" "$S/ledger.sh" append >/dev/null 2>&1 \
+     && [ ! -s "$LEDGER.stub" ]
+then ok; else bad "ledger stored a stub row in the baseline"; fi
+rm -f "$LEDGER.stub"
+if printf '%s' "$sm" | "$S/emit-evidence-beads.sh" >/dev/null 2>&1
+then ok; else bad "evidence producer errored on a stub meter"; fi
+# And the drop-box survives, which is what keeps the commit, memories and
+# tracker delegations alive on a host with no transcripts. The second meter run
+# finding a file written under the id the first one reported is also the proof
+# that a cwd-derived id is stable — that stability is the whole reason a
+# producer and this reader can agree on one with no handshake between them.
+ssid="$(printf '%s' "$sm" | jq -r '.session.id')"
+mkdir -p "$SEV/$ssid"
+jq -cn '{schema: "lastcall.evidence/1", source: "fixture",
+         session_id: "recorded-but-not-used-for-lookup",
+         emitted_at: "2026-08-24T00:00:00Z",
+         tasks: [{id: "F-1", title: "left half done", status: "partial",
+                  artifacts: []}]}' > "$SEV/$ssid/fixture-1.json"
+sm2="$(stub_meter)"
+if printf '%s' "$sm2" | jq -e '(.evidence | length) == 1' >/dev/null 2>&1 \
+     && printf '%s' "$sm2" | "$S/openloops.sh" 2>/dev/null \
+        | jq -e '[.evidence_open[] | select(.id == "F-1")] | length == 1' >/dev/null 2>&1
+then ok; else bad "stub meter lost the evidence drop-box"; fi
+rm -rf "$SROOT"
 
 # 3. The statusLine capture. Both paths matter and only one of them shows up in
 # the sweep: almost no session has a capture, so "absent" is well covered by

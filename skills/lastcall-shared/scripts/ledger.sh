@@ -77,6 +77,26 @@ cmd_append() {
   local meter cost sid ev row commits repo t0 t1
   meter="$(cat)"
 
+  # A stub meter read no transcript (meter-session.sh), so there is nothing here
+  # for a BASELINE to be built from: no cost, no active time, no token rows. Two
+  # separate harms follow from writing the row anyway, which is why this refuses
+  # rather than storing nulls.
+  #
+  # It would poison `trend`. Its medians take `.cost.usd` and `.active_s / 60`
+  # straight off every row; a null sorts below every number in jq, and null
+  # divided by a number aborts the program outright.
+  #
+  # And it would DESTROY history. Rows are replaced on session_id alone, and a
+  # stub id is derived from the working directory, so the second stub session in
+  # a directory would silently overwrite the first — a directory-keyed id is not
+  # a session identity, it is a rendezvous point for the evidence drop-box.
+  #
+  # Exit 0, not an error: nothing went wrong, there is simply nothing to record.
+  if printf '%s' "$meter" | jq -e '.stub != null' >/dev/null 2>&1; then
+    echo "ledger: stub meter (no transcript) — no measurements to add to the baseline, row not written" >&2
+    return 0
+  fi
+
   # Session commits, discovered from the metered window and unioned with any
   # SHAs the caller passed. The old comment here said only the caller knows
   # which commits belong to this session, which was true when lastcall was the
