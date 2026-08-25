@@ -661,6 +661,55 @@ discovers the session commits itself, and writes one file per run:
   `$PWD` when the recorded path no longer exists — a renamed directory leaves
   every later row pointing at a path that is gone (5 of 26 sessions here).
 
+### Producer registration: pushed by name, not discovered
+
+**Consumption is extensible and production is not, and that asymmetry is
+deliberate.** `evidence_for` globs the drop-box, accepts any `source`, dedupes,
+skips unparseable files with a warning, and preserves unknown fields — adding a
+producer needs zero changes here. But exactly one producer is ever *invoked*,
+by name, from the skill, with its own `allowed-tools` entries. There is no
+registry, no discovery, no config key. Anyone can write a producer and nothing
+will run it.
+
+For **push** producers that is not a gap: contract 2 *is* the registration
+mechanism. A skill that does real work writes a file at its own task
+transitions, and nothing needs to invoke it. That is the intended path, and the
+one Fathom should take.
+
+It bites only **pull** producers, which derive from a passive store at wrap-up
+time because no agent is there to push. `emit-evidence-beads.sh` is one. So is
+every item in the "evidence beyond git" epic — an mtime sweep, published
+Artifact URLs, tracker status transitions. Adding those the way beads was added
+yields one hardcoded invocation each and an `allowed-tools` list that grows per
+producer.
+
+**Decision, 2026-08-25: they stay hardcoded, and a runner is not built yet.**
+Three reasons, in order of weight:
+
+1. **Dedupe has no rule for a second producer.** Two producers claiming the
+   same task id are both counted today — confirmed empirically, not inferred:
+   evidence from `fathom` and from `linear` both naming `ONC-5` survive
+   `group_by([.source, .id])` and report `completed: 2` for one task. A runner
+   exists to make a second producer cheap, so building it first makes
+   double-counting easy to reach. Precedence or a namespaced task identity
+   comes first.
+2. **No second pull producer is waiting.** Every item in that epic is open, and
+   the Fathom path is push-side and owned upstream. A runner would be built for
+   a caller that does not exist.
+3. **It is a real execution surface, and it costs the permission model.**
+   Running every executable in a directory is arbitrary code execution by
+   design, and it collapses per-script `allowed-tools` entries into one entry
+   that can execute anything — a regression in a permission model this skill
+   has otherwise kept narrow. A scanner would flag it and would be right to.
+
+Revisit when a second pull producer is genuinely ready to ship *and* the
+double-count rule exists. What the runner would then have to settle, none of
+which is settled here: the trust boundary (ship-with-the-skill only, or a
+user-owned directory behind explicit opt-in), how least privilege survives one
+generic invocation, and a per-producer timeout — one producer blocking on a
+tracker call must not hold up wrap-up, consistent with the 20s discipline in
+`detect.sh`.
+
 ### Rules for consumers
 
 - Glob all `*.json`; skip unparseable files with a warning rather than aborting.
