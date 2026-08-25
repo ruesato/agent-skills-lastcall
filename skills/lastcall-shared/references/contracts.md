@@ -187,8 +187,10 @@ downstream from `references/pricing.md` so this contract stays correct.
 
   "friction": { "tool_errors": 7, "interrupts": 1, "denials": 0 },
 
-  // Filled from the contract 2 drop-box, deduped on (source, task.id) keeping
-  // the highest emitted_at. [] means no producer wrote anything, which is the
+  // Filled from the contract 2 drop-box, merged on task.id alone: one entry
+  // per task however many producers described it, artifacts unioned, and the
+  // highest emitted_at deciding the rest. Each entry also carries `sources`
+  // with every contributor. [] means no producer wrote anything, which is the
   // normal case. openloops.sh narrows this to partial/blocked for Open loops.
   "evidence": [],
 
@@ -576,6 +578,12 @@ disk — and nothing guarantees a third-party producer's files survive there.
 - `artifacts` is how a claim earns trust. **A `completed` task with an empty
   `artifacts` array is reported by `lastcall` as unverified** rather than
   counted — this is the grounding rule reaching into the contract.
+- **`id` is the merge key across producers**, so it has to name the task the
+  same way everyone else names it. Use the tracker key verbatim. Invent an id
+  only when there is no tracker to borrow one from, and prefix it if it could
+  collide with another tracker in the same session (`linear:ONC-5`) — two
+  producers must not disagree about whether a prefix is there, or one task
+  arrives as two.
 - Unknown fields are preserved and ignored. Add fields freely; never repurpose
   an existing one.
 - Bump `schema` on any breaking change. Consumers reject unknown major versions
@@ -684,27 +692,26 @@ yields one hardcoded invocation each and an `allowed-tools` list that grows per
 producer.
 
 **Decision, 2026-08-25: they stay hardcoded, and a runner is not built yet.**
-Three reasons, in order of weight:
+Two reasons, in order of weight:
 
-1. **Dedupe has no rule for a second producer.** Two producers claiming the
-   same task id are both counted today — confirmed empirically, not inferred:
-   evidence from `fathom` and from `linear` both naming `ONC-5` survive
-   `group_by([.source, .id])` and report `completed: 2` for one task. A runner
-   exists to make a second producer cheap, so building it first makes
-   double-counting easy to reach. Precedence or a namespaced task identity
-   comes first.
-2. **No second pull producer is waiting.** Every item in that epic is open, and
+1. **No second pull producer is waiting.** Every item in that epic is open, and
    the Fathom path is push-side and owned upstream. A runner would be built for
    a caller that does not exist.
-3. **It is a real execution surface, and it costs the permission model.**
+2. **It is a real execution surface, and it costs the permission model.**
    Running every executable in a directory is arbitrary code execution by
    design, and it collapses per-script `allowed-tools` entries into one entry
    that can execute anything — a regression in a permission model this skill
    has otherwise kept narrow. A scanner would flag it and would be right to.
 
-Revisit when a second pull producer is genuinely ready to ship *and* the
-double-count rule exists. What the runner would then have to settle, none of
-which is settled here: the trust boundary (ship-with-the-skill only, or a
+A third reason stood here until 2026-08-25 and is now discharged: dedupe had
+no rule for a second producer, and two producers claiming the same task id were
+both counted — confirmed empirically, not inferred, with evidence from `fathom`
+and from `linear` both naming `ONC-5` reporting `completed: 2` for one task.
+The merge rule under "Rules for consumers" settles it, so a runner no longer
+makes double-counting easy to reach.
+
+Revisit when a second pull producer is genuinely ready to ship. What the runner
+would then have to settle, none of which is settled here: the trust boundary (ship-with-the-skill only, or a
 user-owned directory behind explicit opt-in), how least privilege survives one
 generic invocation, and a per-producer timeout — one producer blocking on a
 tracker call must not hold up wrap-up, consistent with the 20s discipline in
@@ -713,8 +720,36 @@ tracker call must not hold up wrap-up, consistent with the 20s discipline in
 ### Rules for consumers
 
 - Glob all `*.json`; skip unparseable files with a warning rather than aborting.
-- Dedupe on `(source, task.id)`, keeping the highest `emitted_at`. A task
-  re-emitted as `completed` supersedes its earlier `partial`.
+- **Task identity is `task.id` alone. `source` is not part of it.** Records
+  sharing an id are one task, however many producers described it. Merge them:
+
+  | Field | Rule |
+  |---|---|
+  | `status`, `title`, `notes`, `started`, `ended` | from the record with the highest `emitted_at` |
+  | `artifacts`, `artifact_matches` | union across every contributing record |
+  | `source` | the highest-`emitted_at` contributor |
+  | `sources` | every contributor, added by the consumer |
+
+  Recency deciding status is the single-producer rule generalized: a task
+  re-emitted as `completed` supersedes its earlier `partial`, whoever emitted
+  it. Ties on `emitted_at` break on `source` name, so the winner does not
+  depend on directory glob order. Unioning `artifacts` is what stops a task
+  grounded by one producer being reported `unverified` because the other saw no
+  commit — merging *improves* grounding rather than picking a winner for it.
+
+  **Precedence between named producers was considered and rejected.** A rank
+  order needs a registry, and consumption here accepts any `source` with no
+  registration at all (see below); an unknown producer would have no rank. A
+  recency rule is source-agnostic, so it keeps that property.
+
+  **Known cost, chosen deliberately:** two genuinely different tasks that share
+  an id across trackers — `ONC-5` in Linear and in Jira — merge into one and
+  undercount by one. The alternative was the previous behaviour, which
+  overcounted by one for *every* task two producers both described, which is
+  the guaranteed case rather than the rare one. Between the two directions of
+  error, a productivity ratio should take the one that under-claims. A producer
+  whose ids are not globally unique can namespace them in the id itself
+  (`linear:ONC-5`); that needs no new field and no change here.
 - **An empty `tasks` array is a marker, never a retraction.** It says the
   producer ran; it does not withdraw what an earlier run established. Dedupe is
   keyed on task id and an empty document carries none, so this falls out of the

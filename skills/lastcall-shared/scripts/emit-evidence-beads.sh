@@ -240,9 +240,9 @@ out="$(printf '%s' "$issues" | jq -c \
 # those is a measurement and the other is the absence of one, and section 3
 # requires absent evidence to be recorded as absent rather than as zero.
 #
-# It is not a retraction. Consumers dedupe on (source, task.id) keeping the
-# highest `emitted_at`, and an empty document carries no task ids, so a later
-# empty run cannot erase tasks an earlier run established.
+# It is not a retraction. Consumers merge on task.id alone, keeping the highest
+# `emitted_at`, and an empty document carries no task ids, so a later empty run
+# cannot erase tasks an earlier run established.
 #
 # The early exits above stay silent and write nothing, because they are the
 # other state: no `bd` on PATH, no beads workspace, no session window, or no

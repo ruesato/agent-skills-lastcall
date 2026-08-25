@@ -153,8 +153,12 @@ fi
 # the bottom of this file was documented as "filled from contract 2" and nothing
 # ever filled it -- openloops.sh reads $m.evidence, so partial and blocked tasks
 # were recorded in the ledger counts and silently dropped from the report the
-# user actually reads. Deduped on (source, task.id) keeping the highest
-# emitted_at, per the consumer rules in contracts.md.
+# user actually reads. Merged on task.id ALONE, per the consumer rules in
+# contracts.md section 2: the SOURCE is deliberately not part of the key, so two
+# producers describing one task yield one task rather than two. Artifacts union
+# and the most recent observation decides status. ledger.sh:evidence_for applies
+# the same rule to produce counts, and verify.sh pins the two against each other
+# -- a merge rule that holds in one reader and not the other is worse than none.
 EVDIR="${LASTCALL_EVIDENCE_DIR:-$HOME/.claude/lastcall/evidence}/$SID"
 EV='[]'
 if [ -d "$EVDIR" ]; then
@@ -166,9 +170,23 @@ if [ -d "$EVDIR" ]; then
       else echo "meter: skipping unparseable evidence $f" >&2; fi
     done
     if [ ${#evok[@]} -gt 0 ]; then
+      # No apostrophes in this program: it is single-quoted in sh.
+      # sort_by([.emitted_at, .source]) rather than max_by(.emitted_at): with
+      # two producers a tie on emitted_at is reachable, and glob order is not a
+      # tiebreak anyone can reason about. Source name breaks it the same way on
+      # every machine. artifact_matches is set only when some record carried it,
+      # because absent there means unlabeled and [] would assert more than was
+      # observed.
       EV="$(jq -s -c '
         map(. as $d | (.tasks // [])[] | {source: $d.source, emitted_at: $d.emitted_at} + .)
-        | group_by([.source, .id]) | map(max_by(.emitted_at))' "${evok[@]}")" || EV='[]'
+        | group_by(.id)
+        | map( sort_by([.emitted_at, .source]) as $g
+               | ($g | map(.artifact_matches // []) | add | unique) as $am
+               | ($g | last)
+                 + { sources:   ($g | map(.source) | unique),
+                     artifacts: ($g | map(.artifacts // []) | add | unique) }
+                 + (if ($am | length) > 0 then {artifact_matches: $am} else {} end) )
+        ' "${evok[@]}")" || EV='[]'
     fi
   fi
 fi

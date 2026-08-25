@@ -224,9 +224,9 @@ printf '%s' "$M" | $S/ledger.sh append
 ```
 
 Both steps are idempotent, so this is safe to re-run: the producer writes a new
-timestamped file each time and `evidence_for` dedupes on `(source, task id)`
-keeping the newest, while `append` replaces the row keyed on `session_id`
-alone. What it needs:
+timestamped file each time and `evidence_for` merges on task id alone, keeping
+the newest observation of each task and unioning its artifacts, while `append`
+replaces the row keyed on `session_id` alone. What it needs:
 
 - **The transcript still on disk.** `meter-session.sh` reads it; there is no
   other source for the session window.

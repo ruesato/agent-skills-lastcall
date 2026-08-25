@@ -57,11 +57,25 @@ evidence_for() {
   [ ${#ok[@]} -gt 0 ] || { printf '%s' 'null'; return; }
 
   jq -s '
-    # Dedupe on (source, task.id), keeping the highest emitted_at: a task
-    # re-emitted as completed supersedes its earlier partial.
+    # Merge on task.id ALONE. The SOURCE used to be part of the key, and that
+    # double-counted every task two producers both described -- evidence from
+    # fathom and from linear each naming ONC-5 reported completed 2 for one
+    # task. That is the configuration epic 626 drives toward, so it had to be
+    # settled before a second producer ships. See contracts.md section 2.
+    #
+    # The most recent observation decides status, which is the old single-source
+    # rule generalized: a task re-emitted as completed still supersedes its
+    # earlier partial, whoever emitted it. Artifacts union, so a task grounded
+    # by one producer is not reported unverified because the other saw no
+    # commit. Only artifacts are merged onto the task here -- this reader emits
+    # counts, so sources and artifact_matches would be carried and dropped;
+    # meter-session.sh, which emits the tasks themselves, merges those too.
+    # No apostrophes in this program: it is single-quoted in sh.
     ( map(. as $d | (.tasks // [])[] | {source: $d.source, emitted_at: $d.emitted_at} + .)
-      | group_by([.source, .id])
-      | map(max_by(.emitted_at))
+      | group_by(.id)
+      | map( sort_by([.emitted_at, .source]) as $g
+             | ($g | last)
+               + { artifacts: ($g | map(.artifacts // []) | add | unique) } )
     ) as $t
     | { sources:    (map(.source) | unique),
         completed:  ($t | map(select(.status=="completed"))  | length),

@@ -1073,6 +1073,80 @@ if [ ! -e "$RDIR/tally.json" ] \
 then ok; else bad "scan-skills.sh did not report a genuine crash correctly"; fi
 rm -rf "$RDIR" "$FAKESS"
 
+# 8. Two producers describing the SAME task. Latent while only one producer
+# exists and guaranteed the moment a second lands, which is the configuration
+# epic 626 drives toward. The old key was (source, task.id), so evidence from
+# `fathom` and from `linear` both naming ONC-5 survived dedupe and reported
+# completed 2 for one task — confirmed empirically before the fix, not inferred.
+#
+# Both readers are exercised against ONE drop-box, deliberately. The merge rule
+# lives in two places (meter-session.sh emits the tasks, ledger.sh:evidence_for
+# emits the counts) and they are never called together at runtime, so nothing
+# else would notice them drifting apart. Here a disagreement is a failure.
+MROOT="$(mktemp -d "$TMP/lastcall-merge.XXXXXX")"
+MSID="merge-fixture"
+mkdir -p "$MROOT/ev/$MSID" "$MROOT/work"
+# a: an UNGROUNDED completed claim, emitted first, plus a task left partial.
+jq -cn --arg s "$MSID" '{schema: "lastcall.evidence/1", source: "a", session_id: $s,
+  emitted_at: "2026-08-25T09:00:00Z",
+  tasks: [{id: "T-1", title: "claimed", status: "completed", artifacts: []},
+          {id: "T-2", title: "half",    status: "partial",   artifacts: []}]}' \
+  > "$MROOT/ev/$MSID/a.json"
+# b: the same two tasks, later, with grounding — and one only b can see.
+jq -cn --arg s "$MSID" '{schema: "lastcall.evidence/1", source: "b", session_id: $s,
+  emitted_at: "2026-08-25T10:00:00Z",
+  tasks: [{id: "T-1", title: "claimed", status: "completed", artifacts: ["commit:beef"]},
+          {id: "T-2", title: "half",    status: "completed", artifacts: ["commit:cafe"]},
+          {id: "T-3", title: "only b",  status: "blocked",   artifacts: []}]}' \
+  > "$MROOT/ev/$MSID/b.json"
+# c: the empty-tasks marker. It says c ran; it must retract nothing.
+jq -cn --arg s "$MSID" '{schema: "lastcall.evidence/1", source: "c", session_id: $s,
+  emitted_at: "2026-08-25T12:00:00Z", tasks: []}' > "$MROOT/ev/$MSID/c.json"
+
+mev="$( cd "$MROOT/work" && CLAUDE_PROJECTS="$MROOT/none" CLAUDE_SESSION_ID="$MSID" \
+        LASTCALL_EVIDENCE_DIR="$MROOT/ev" "$S/meter-session.sh" 2>/dev/null \
+        | jq -c '.evidence' )"
+# Three tasks, not five. T-1 carries both sources, and the newest observation
+# supplies the scalar fields. T-3 is untouched by the merge.
+if printf '%s' "$mev" | jq -e '
+      length == 3
+      and ([.[] | select(.id == "T-1")] | length) == 1
+      and (.[] | select(.id == "T-1") | .sources) == ["a", "b"]
+      and (.[] | select(.id == "T-1") | .source)  == "b"
+      and (.[] | select(.id == "T-3") | .sources) == ["b"]' >/dev/null 2>&1
+then ok; else bad "meter counted one task twice for two producers"; fi
+# Artifacts UNION. T-1 is grounded by b alone, and merging is what stops it
+# being reported unverified on the strength of the ungrounded claim from a.
+# artifact_matches stays ABSENT when no record carried it — [] there would
+# assert an empty labeling that was never observed.
+if printf '%s' "$mev" | jq -e '
+      (.[] | select(.id == "T-1") | .artifacts) == ["commit:beef"]
+      and (.[] | select(.id == "T-1") | has("artifact_matches")) == false' >/dev/null 2>&1
+then ok; else bad "meter did not union artifacts across producers"; fi
+# A partial superseded by a completed from a DIFFERENT source still supersedes.
+if printf '%s' "$mev" | jq -e '
+      (.[] | select(.id == "T-2") | .status) == "completed"' >/dev/null 2>&1
+then ok; else bad "a cross-source completed did not supersede an earlier partial"; fi
+
+# The counts reader must agree, task for task, on the same drop-box.
+mrow="$( printf '%s' '{"session":{"id":"merge-fixture","cwd":"/","branch":"main",
+  "started":"1970-01-01T00:00:00Z","ended":"1970-01-01T00:00:01Z","wall_s":1,
+  "active_s":1,"meter_version":1,"dedup":null,"agent_s":null},"tokens":[],
+  "agents":[],"work":{"tools":{},"files":{}},
+  "friction":{"tool_errors":0,"interrupts":0,"denials":0},"evidence":[]}' \
+  | LASTCALL_LEDGER="$LEDGER.merge" LASTCALL_EVIDENCE_DIR="$MROOT/ev" \
+    LASTCALL_COMMIT_DISCOVERY=0 "$S/ledger.sh" append 2>/dev/null )"
+# completed 2 (T-1, T-2), blocked 1 (T-3), unverified 0 — the grounding from b
+# reaches T-1. Before the merge this row read completed 3 and unverified 1.
+# `c` appears in sources with no task of its own: assessed, nothing found.
+if printf '%s' "$mrow" | jq -e '.evidence.completed == 2
+      and .evidence.partial == 0 and .evidence.blocked == 1
+      and .evidence.unverified == 0
+      and .evidence.sources == ["a", "b", "c"]' >/dev/null 2>&1
+then ok; else bad "ledger counts disagree with the meter on a merged drop-box"; fi
+rm -f "$LEDGER.merge"
+rm -rf "$MROOT"
+
 say "  fixtures checked"
 
 # ---------------------------------------------------------------- result

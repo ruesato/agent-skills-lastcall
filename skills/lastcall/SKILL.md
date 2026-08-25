@@ -366,8 +366,10 @@ Evidence arrives through the drop-box at
 `LASTCALL_EVIDENCE_DIR`) — producers write there, and `ledger.sh` folds it into
 `.evidence`. It is keyed on the session id alone, so a directory rename or a
 `--worktree` session still finds its own evidence. Glob it, skip
-unparseable files with a warning rather than aborting, and dedupe on
-`(source, task.id)` keeping the highest `emitted_at`. Full shape in
+unparseable files with a warning rather than aborting, and merge on `task.id`
+alone — the producer name is not part of the identity, so two producers
+describing one task yield one task, with their artifacts pooled and the highest
+`emitted_at` deciding the rest. Full shape in
 `../lastcall-shared/references/contracts.md` section 2.
 
 `openloops.sh` gives you `session_files_uncommitted`, `churn_hotspots`,
