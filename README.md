@@ -71,9 +71,15 @@ prints a **stub** — a JSON document of the normal shape with every measurement
 `null` and a `stub` block saying why. That is the expected result, not a
 failure: see "When there is no transcript" below for what still works.
 
-The skills appear in Kiro's **Agent Steering & Skills** panel and are
-invocable with `/lastcall` and `/tally`. `lastcall-shared` is a file
-container, not invocable.
+**Confirmed 2026-08-25 on Kiro 1.0.337** (`kiroAgent` 1.0.653): the panel is
+real — command palette → "Kiro: Focus on Agent Steering & Skills View" opens
+a section literally titled **AGENT STEERING & SKILLS**, and `lastcall`,
+`lastcall-shared`, and `tally` all appear under it correctly via the symlinks
+`install.sh` creates. `lastcall-shared` is a file container, not invocable.
+
+This was not always true — Kiro versions before 1.0.288 (2026-08-07) have no
+skills feature at all; see `docs/kiro-runtime-findings.md` and
+`agent-skill-wrapup-h12` for that history if you're on an older install.
 
 To uninstall:
 
