@@ -989,6 +989,56 @@ if command -v bd >/dev/null 2>&1; then
   rm -rf "$VROOT"
 fi
 
+# 7. scan-skills.sh: a CRITICAL finding must not be reported as a crash
+# (agent-skill-wrapup-5tb). skillspector exits non-zero for both a genuine
+# crash and a CRITICAL finding, and the two used to be indistinguishable —
+# the JSON report was discarded either way and both were blamed on "the
+# install and provider credentials". A fake skillspector on PATH stands in
+# for the real one so this is a test of scan-skills.sh's own exit-code/report
+# handling, not of skillspector itself.
+FAKESS="$(mktemp -d "$TMP/lastcall-fakess.XXXXXX")"
+cat > "$FAKESS/skillspector" <<'FAKE'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then echo "skillspector 0.0.0-fake"; exit 0; fi
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "--output" ] && out="$a"; prev="$a"; done
+case "${FAKE_SS_MODE:-clean}" in
+  critical)
+    # A real CRITICAL finding still exits non-zero, but writes a full report.
+    jq -n '{risk_assessment: {score: 95, severity: "critical", recommendation: "block"},
+            issues: [{id: "P4", pattern: "kill-a-person", severity: "CRITICAL",
+                      finding: "kill a person", explanation: "matched span",
+                      remediation: "reword",
+                      location: {file: "SKILL.md", start_line: 7}}],
+            suppressed: [], suppressed_count: 0}' > "$out"
+    exit 1 ;;
+  crash)
+    # A genuine crash writes no report at all.
+    exit 1 ;;
+esac
+FAKE
+chmod +x "$FAKESS/skillspector"
+
+RDIR="$(mktemp -d "$TMP/lastcall-ssreport.XXXXXX")"
+# The finding is reported, not swallowed as a crash: the JSON report survives
+# with its matched span, and stderr never claims a crash.
+ss_out="$(PATH="$FAKESS:$PATH" FAKE_SS_MODE=critical REPORT_DIR="$RDIR" \
+          "$HERE/bin/scan-skills.sh" tally 2>&1)"
+if [ -s "$RDIR/tally.json" ] \
+   && jq -e '.issues[0].finding == "kill a person"' "$RDIR/tally.json" >/dev/null 2>&1 \
+   && ! printf '%s' "$ss_out" | grep -qi "crashed"
+then ok; else bad "scan-skills.sh mislabeled a CRITICAL finding as a crash"; fi
+rm -f "$RDIR/tally.json" "$RDIR/tally.md"
+
+# A genuine crash — no report written at all — must still report as a crash,
+# so a skill that was never assessed is never reported as passing.
+ss_crash="$(PATH="$FAKESS:$PATH" FAKE_SS_MODE=crash REPORT_DIR="$RDIR" \
+            "$HERE/bin/scan-skills.sh" tally 2>&1)"
+if [ ! -e "$RDIR/tally.json" ] \
+   && printf '%s' "$ss_crash" | grep -qi "crashed while scanning tally"
+then ok; else bad "scan-skills.sh did not report a genuine crash correctly"; fi
+rm -rf "$RDIR" "$FAKESS"
+
 say "  fixtures checked"
 
 # ---------------------------------------------------------------- result

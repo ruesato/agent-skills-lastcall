@@ -23,7 +23,9 @@
 #      produce the report could contradict the verdict that gated CI.
 #   2. A scanner crash is not a clean skill. Crashes are counted separately from
 #      findings and fail the run with their own message, so a skill that was never
-#      assessed is never reported as passing.
+#      assessed is never reported as passing. A CRITICAL finding also exits
+#      non-zero (agent-skill-wrapup-5tb), so the exit code alone cannot tell a
+#      crash from a finding — the report on disk is what decides which one it was.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -89,12 +91,26 @@ for skill in "${skill_names[@]}"; do
   scanned=$((scanned + 1))
   json="$(mktemp)"
 
-  # skillspector is documented to always exit 0, but a crash (bad install,
-  # provider error in the LLM stage) can still exit non-zero; under set -e an
-  # unguarded call would kill the whole run with no summary and no reports.
-  if ! skillspector scan "$skill_dir" ${scan_flags[@]+"${scan_flags[@]}"} ${baseline_flags[@]+"${baseline_flags[@]}"} \
-    --format json --output "$json" >/dev/null; then
-    echo "ERROR: skillspector crashed while scanning $skill" >&2
+  # skillspector exits 0 for a clean scan or a suppressible finding, but a
+  # CRITICAL finding also exits non-zero (verified 2026-08-25, see
+  # agent-skill-wrapup-5tb) — indistinguishable by exit code alone from a
+  # genuine crash (bad install, provider error in the LLM stage). Under set -e
+  # an unguarded call would kill the whole run with no summary and no reports,
+  # so the call is guarded regardless of which case this turns out to be.
+  scan_rc=0
+  skillspector scan "$skill_dir" ${scan_flags[@]+"${scan_flags[@]}"} ${baseline_flags[@]+"${baseline_flags[@]}"} \
+    --format json --output "$json" >/dev/null 2>&1 || scan_rc=$?
+
+  # A crash and a CRITICAL finding are told apart by whether a parseable report
+  # exists, not by the exit code: a crash leaves no report (or a truncated
+  # one), a CRITICAL finding leaves a normal one. Only the report-less case is
+  # the crash path — treating a CRITICAL finding as one used to discard the
+  # report and blame "the install and provider credentials" for what was
+  # actually a matched pattern.
+  if [ "$scan_rc" -ne 0 ] \
+     && ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$json" >/dev/null 2>&1
+  then
+    echo "ERROR: skillspector crashed while scanning $skill (exit $scan_rc, no parseable report)" >&2
     crashes=$((crashes + 1))
     rm -f "$json"
     continue

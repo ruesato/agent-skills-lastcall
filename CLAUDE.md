@@ -184,6 +184,13 @@ points the reader away from the finding and does not name it. `score` and
 `rule_id` both come back null, unlike the MEDIUM findings above. If the gate
 says "crashed", run the scanner directly before believing it.
 
+Fixed 2026-08-25 (agent-skill-wrapup-5tb): `bin/scan-skills.sh` now tells a
+CRITICAL finding apart from a real crash by whether a parseable JSON report
+was written, not by the exit code — both exit non-zero, but only a genuine
+crash leaves no report. A CRITICAL finding is reported as a finding, with its
+report kept under `REPORT_DIR`; "run the scanner directly before believing
+it" is no longer needed for that case, only for an actual crash.
+
 **Diagnosing a hit cheaply:** `REPORT_DIR=<dir> ./bin/scan-skills.sh <skill>`
 then `jq -r '.issues[0].finding' <dir>/<skill>.json` prints the matched span —
 `.finding` is the field that carries it; `.evidence` and `.snippet` are null.
