@@ -64,6 +64,8 @@ downstream from `references/pricing.md` so this contract stays correct.
     "ended":    "2026-08-06T08:46:49Z",
     "wall_s":   285131,   // first to last timestamp; near-meaningless if resumed
     "active_s": 7754,     // sum of inter-event gaps <= IDLE_GAP_S (default 300)
+    "spans": [[1756,1799],[2100,2140]],  // when it was WORKING, epoch pairs;
+                                         // sum == active_s, disjoint, ascending
 
     // Claude Code own measure of agent-busy time: the sum of its turn_duration
     // records. No idle heuristic in it, but it is a FLOOR — the turn in flight
@@ -416,7 +418,16 @@ Each of these silently corrupts totals if a reimplementation drops it:
    figure `cost.sh` derives from tokens; `cost.sh` compares them in
    `cross_check` and refuses the comparison outright when `native.wall_ms`
    shows their clock covers less time than the transcript does.
-12. **`agent_s` is a floor, never a replacement for `active_s`.** They measure
+12. **`spans` sum to `active_s`, and are disjoint and ascending.** They are
+   the same gap bucketing kept as intervals instead of summed away, so drift
+   between them would mean the join and the readout describe different
+   sessions. Main lanes only, for the reason `active_s` is: subagents run
+   concurrently and would double-count the same minutes. Merged across the
+   main lanes of a split session, so a consumer can run a containment test
+   without sorting first. A lone timestamp yields a zero-length span rather
+   than nothing — the session *was* active at that instant. Absent on output
+   from an older meter, which is unmeasured, never an empty list.
+13. **`agent_s` is a floor, never a replacement for `active_s`.** They measure
    different things — agent busy versus human engaged — and only `active_s`
    covers the turn currently in flight.
 13. **A `work.skills` row is not a skill price tag, and attribution is not
@@ -642,6 +653,17 @@ discovers the session commits itself, and writes one file per run:
   nothing. Absence is the normal case. **This is not the same state as running
   and matching nothing**, and the two must not arrive at a consumer looking
   alike — see the marker rule below.
+- **`session_join` records HOW the bead was tied to the session.** `span`
+  means the transition landed inside real session activity; `window` means it
+  only fell between the first and last timestamp, so the session may have been
+  idle at the time. Absent on files written before spans existed, which is
+  unknown, not `window`.
+
+  A window-only match is **never dropped**. Doing so would turn an over-claim
+  into a silent under-claim, which is worse: a bead closed during an idle gap
+  — the user walks away after `bd close`, or it is closed from a plain CLI —
+  would then be claimed by nobody at all. The weaker tier is recorded and
+  stays visible, exactly as the commit join keys tier rather than discard.
 - **Evidence files are per-window and NOT mutually exclusive.** The producer
   assigns a bead to every session whose window contains its transition, and
   session windows in one workspace overlap routinely (section 3). Only `trend`
@@ -959,6 +981,14 @@ build one from.
     row at once, and it recomputes on each call, so it cannot go stale.
   - It is scoped by **cwd**. Two sessions in different workspaces read
     different bead databases and cannot be claiming the same task.
+  - It tests **activity, not the bare window**, whenever both rows carry
+    `spans`. A session left open across a break has a window covering the
+    whole break and no activity in it; a window test calls that an overlap and
+    discards a row that was never in conflict. When either row predates spans
+    the pair falls back to the window — a *superset* of the activity, so the
+    fallback can only over-report, never under-report — and
+    `window_overlap_basis` says which test produced the answer. The fallback
+    is per **pair**, not per ledger.
   - An unreadable window yields `null`, not `[]`. That is *unknown* overlap,
     and it is excluded from the ratios rather than trusted into them — the
     same absent-is-not-zero rule as everywhere else in this section.

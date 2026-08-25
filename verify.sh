@@ -146,6 +146,19 @@ for f in "$PROJECTS"/*/*.jsonl; do
         | jq --arg c "$mcwd" '[.churn_hotspots[]?.file | select(startswith($c) | not)] | length')"
   if [ "${ext:-1}" = "0" ]; then ok; else bad "openloops $sid: churn includes out-of-project files"; fi
 
+  # Activity spans are the SAME gap bucketing as active_s, kept as intervals
+  # instead of summed away, so the two must never drift: they would otherwise
+  # be describing different sessions, and the join reads one while the readout
+  # reports the other. Also asserts the list is disjoint and ascending, which
+  # is what lets a consumer run a containment test without sorting it first.
+  if printf '%s' "$out" | jq -e '
+        (.session.spans // []) as $sp
+        | (([$sp[] | .[1] - .[0]] | add // 0) == (.session.active_s // 0))
+          and all($sp[]; .[0] <= .[1])
+          and ([range(1; $sp|length) as $i | select($sp[$i][0] <= $sp[$i-1][1])] | length == 0)
+      ' >/dev/null 2>&1; then ok
+  else bad "meter $sid: spans do not sum to active_s, or are not disjoint and ascending"; fi
+
   if printf '%s' "$out" | "$S/ledger.sh" append >/dev/null 2>&1; then ok
   else bad "ledger $sid"; fi
 done
@@ -875,6 +888,70 @@ then ok; else bad "a row with an unreadable window did not report its overlap as
 if LASTCALL_LEDGER="$LJ2" "$S/ledger.sh" trend | jq -e '
       .per_task_basis | test("1 excluded for an unreadable window")' >/dev/null 2>&1
 then ok; else bad "a row with an unreadable window was counted as having a disjoint one"; fi
+
+# 3d-quater. Overlap is tested against ACTIVITY, not the bare window. A session
+# left open across a break has a window covering the whole break and no
+# activity in it; a window test calls that an overlap and discards a row that
+# was never in conflict. Measured across 60 local transcripts, windows of 409h
+# and 313h carry near-zero activity, so this is the common case, not an edge.
+srow() { # sid t0 t1 cwd usd completed  spans-as-ISO-pairs-JSON
+  jq -cn --arg s "$1" --arg t0 "$2" --arg t1 "$3" --arg c "$4" \
+         --argjson u "$5" --argjson n "$6" --argjson sp "$7" '
+    def ts: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+    {schema: "lastcall.ledger/1", session_id: $s, cwd: $c, branch: "main",
+     started: $t0, ended: $t1, active_s: 3600, meter_version: 2,
+     dedup: {rid_coverage: 1, mid_coverage: 1},
+     spans: (if $sp == null then null else [$sp[] | [(.[0]|ts), (.[1]|ts)]] end),
+     cost: {usd: $u, by_model: [], pricing_source: "t", promo_applied: false,
+            promo_models: [], by_skill: [], caveats: []},
+     tokens: [], work: {tool_calls: 10, files_changed: 1, commits: []},
+     friction: {tool_errors: 0, interrupts: 0, denials: 0},
+     evidence: {sources: ["beads"], completed: $n, partial: 0, blocked: 0,
+                abandoned: 0, unverified: 0}}'
+}
+LROOT4="$(mktemp -d)"; LJ4="$LROOT4/led"
+# env holds a 20h window but only WORKS in the first and last hour. a and b run
+# inside the idle gap and are not in conflict with it; c genuinely works at the
+# same time as the second span and IS.
+ENVSP='[["2026-08-01T00:00:00Z","2026-08-01T01:00:00Z"],["2026-08-01T19:00:00Z","2026-08-01T20:00:00Z"]]'
+{ srow env "2026-08-01T00:00:00Z" "2026-08-01T20:00:00Z" /w1 30 6 "$ENVSP"
+  srow a   "2026-08-01T02:00:00Z" "2026-08-01T04:00:00Z" /w1  4 4 '[["2026-08-01T02:00:00Z","2026-08-01T04:00:00Z"]]'
+  srow b   "2026-08-01T06:00:00Z" "2026-08-01T08:00:00Z" /w1  6 3 '[["2026-08-01T06:00:00Z","2026-08-01T08:00:00Z"]]'
+  srow c   "2026-08-01T19:30:00Z" "2026-08-01T19:45:00Z" /w1  5 2 '[["2026-08-01T19:30:00Z","2026-08-01T19:45:00Z"]]'
+} > "$LJ4"
+if LASTCALL_LEDGER="$LJ4" "$S/ledger.sh" trend | jq -e '
+      ([.window_overlaps[].session_id] | sort == ["c","env"])
+      and ((.window_overlaps[] | select(.session_id == "env") | .overlaps) == ["c"])' >/dev/null 2>&1
+then ok; else bad "sessions running inside an idle window were still reported as overlapping"; fi
+# The two rows that were never in conflict are returned to the per-task median.
+if LASTCALL_LEDGER="$LJ4" "$S/ledger.sh" trend | jq -e '
+      .per_task.rows == 2' >/dev/null 2>&1
+then ok; else bad "rows working inside an idle envelope were excluded from the per-task median"; fi
+# And a genuinely concurrent session is still caught -- the tighter test must
+# not simply stop reporting overlaps.
+if LASTCALL_LEDGER="$LJ4" "$S/ledger.sh" trend c | jq -e '
+      .focus.window_overlap == ["env"]' >/dev/null 2>&1
+then ok; else bad "a genuinely concurrent session was no longer reported as overlapping"; fi
+# Rows predating spans fall back to the WINDOW, which is a superset of the
+# activity -- so the fallback can only over-report, never under-report. All
+# four are flagged here, which is the pre-span answer.
+jq -c 'del(.spans)' "$LJ4" > "$LJ4.n" && mv "$LJ4.n" "$LJ4.none"
+if LASTCALL_LEDGER="$LJ4.none" "$S/ledger.sh" trend | jq -e '
+      ([.window_overlaps[].session_id] | sort == ["a","b","c","env"])
+      and (.per_task == null)' >/dev/null 2>&1
+then ok; else bad "a ledger with no spans did not fall back to the window overlap test"; fi
+# The basis says WHICH test produced the answer, so two ledgers can be compared.
+if LASTCALL_LEDGER="$LJ4.none" "$S/ledger.sh" trend a | jq -e '
+      .focus.window_overlap == ["env"]' >/dev/null 2>&1
+then ok; else bad "a span-less row did not fall back to the window for its own overlap"; fi
+# MIXED: the fallback is per PAIR, not per ledger. a has no spans, so env-a
+# falls back and is flagged, while env-b still uses spans and is not.
+jq -c 'if .session_id == "a" then del(.spans) else . end' "$LJ4" > "$LJ4.m"
+if LASTCALL_LEDGER="$LJ4.m" "$S/ledger.sh" trend | jq -e '
+      ((.window_overlaps[] | select(.session_id == "env") | .overlaps | sort) == ["a","c"])' >/dev/null 2>&1
+then ok; else bad "a mixed ledger did not fall back per pair"; fi
+rm -rf "$LROOT4"
+
 rm -rf "$LROOT2"
 
 # 3d-ter. The DENOMINATOR has to be grounded work. evidence_for computes
@@ -1060,6 +1137,41 @@ if command -v bd >/dev/null 2>&1; then
     # only the recipe was missing. This pins the recipe the README now carries.
     #
     # First half: reproduce the failure. Same meter, empty drop-box, null row.
+    # The SESSION JOIN tier. A bead whose transition lands inside real session
+    # activity is a much stronger claim than one that merely falls between the
+    # first and last timestamp -- the window is a loose proxy, and windows of
+    # 409h carrying near-zero activity are real measurements here.
+    gnow="$(date +%s)"
+    gspan_all="[[$(( gnow - 3600 )), $(( gnow + 3600 ))]]"
+    gspan_none="[[$(( gnow - 3600 )), $(( gnow - 3500 ))]]"
+    gm_span="$(printf '%s' "$gmeter" | jq -c --argjson sp "$gspan_all"  '.session.spans = $sp')"
+    gm_win="$(printf  '%s' "$gmeter" | jq -c --argjson sp "$gspan_none" '.session.spans = $sp')"
+    gs1="$(printf '%s' "$gm_span" | LASTCALL_EVIDENCE_DIR="$GROOT/ev-span" \
+             "$S/emit-evidence-beads.sh" 2>/dev/null)"
+    if [ -n "$gs1" ] && jq -e '[.tasks[].session_join] | length > 0 and all(. == "span")' \
+         "$gs1" >/dev/null 2>&1
+    then ok; else bad "producer did not report a span join for beads closed inside session activity"; fi
+    # A transition in the window but in NO span is still emitted, tagged with
+    # the weaker tier. Dropping it would turn an over-claim into a silent
+    # UNDER-claim: a bead closed during an idle gap, or from a plain CLI, would
+    # be claimed by nobody at all.
+    gs2="$(printf '%s' "$gm_win" | LASTCALL_EVIDENCE_DIR="$GROOT/ev-win" \
+             "$S/emit-evidence-beads.sh" 2>/dev/null)"
+    if [ -n "$gs2" ] && jq -e '[.tasks[].session_join] | length > 0 and all(. == "window")' \
+         "$gs2" >/dev/null 2>&1
+    then ok; else bad "producer dropped or mis-tiered a bead that fell outside every activity span"; fi
+    # Same task set either way -- the tier changes, the population does not.
+    if [ -n "$gs1" ] && [ -n "$gs2" ] \
+       && [ "$(jq -c '[.tasks[].id] | sort' "$gs1")" = "$(jq -c '[.tasks[].id] | sort' "$gs2")" ]
+    then ok; else bad "the span tier changed which beads were emitted, not just how they were joined"; fi
+    # A meter with no spans at all degrades to the weaker tier rather than
+    # claiming a strength it cannot support.
+    gs3="$(printf '%s' "$gmeter" | LASTCALL_EVIDENCE_DIR="$GROOT/ev-nospan" \
+             "$S/emit-evidence-beads.sh" 2>/dev/null)"
+    if [ -n "$gs3" ] && jq -e '[.tasks[].session_join] | all(. == "window")' \
+         "$gs3" >/dev/null 2>&1
+    then ok; else bad "producer claimed a span join on a meter that recorded no spans"; fi
+
     GBF="$GROOT/backfill"
     if printf '%s' "$gmeter" | LASTCALL_LEDGER="$GBF/led" LASTCALL_EVIDENCE_DIR="$GBF/ev" \
          "$S/ledger.sh" append >/dev/null 2>&1 \

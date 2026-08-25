@@ -155,6 +155,13 @@ cmd_append() {
       cwd: $m.session.cwd, branch: $m.session.branch,
       started: $m.session.started, ended: $m.session.ended,
       active_s: $m.session.active_s,
+      # When the session was actually WORKING, as [start, end] epoch pairs,
+      # merged across main lanes. The session window is a loose proxy -- a
+      # window of 409h carrying near-zero activity is a real measurement here
+      # -- so trend uses these to test overlap when both rows carry them.
+      # Absent on rows written before spans existed, which is UNKNOWN, and
+      # trend then falls back to the window rather than assuming disjointness.
+      spans: $m.session.spans,
       # How this row was COUNTED. Without it an inflated row and a corrected
       # one are byte-indistinguishable, which made the re-meter repair rule in
       # contracts.md section 3 undocumentable in practice: you could state that
@@ -242,7 +249,15 @@ cmd_trend() {
     # Scoped by cwd: two sessions in different workspaces read different bead
     # databases and cannot be claiming the same task.
     | ($all0 | map(. + { _t0: (.started | ts), _t1: (.ended | ts) })) as $stamped
-    | ($stamped | map(
+    # Two sessions overlap when their ACTIVITY intersects, not merely when one
+    # window contains the other. A session left open across a break has a
+    # window covering the whole break and no activity in it, so a window test
+    # calls that an overlap and discards a row that was never in conflict.
+    # Falls back to the window whenever either row predates spans: the window
+    # is a SUPERSET of the activity, so the fallback is the stricter, more
+    # conservative answer and can only over-report, never under-report.
+    | def ivx($a; $b): any($a[]; . as $x | any($b[]; $x[0] <= .[1] and .[0] <= $x[1]));
+      ($stamped | map(
         . as $r
         | . + { window_overlap:
                  # null, not [], when the window is unreadable. That is
@@ -252,9 +267,17 @@ cmd_trend() {
                          | select(.session_id != $r.session_id
                                   and .cwd == $r.cwd
                                   and ._t0 != null and ._t1 != null
-                                  and ._t0 <= $r._t1 and ._t1 >= $r._t0)
+                                  and (if (($r.spans // []) | length) > 0
+                                          and ((.spans   // []) | length) > 0
+                                       then ivx($r.spans; .spans)
+                                       else (._t0 <= $r._t1 and ._t1 >= $r._t0) end))
                          | .session_id ]
-                  end) }
+                  end),
+                # Which test produced that answer. A reader comparing two
+                # ledgers needs to know whether the tighter one was available.
+                window_overlap_basis:
+                 (if (($r.spans // []) | length) > 0 then "activity spans"
+                  else "session window (spans not recorded)" end) }
         | del(._t0, ._t1))) as $all
 
     # Per-task ratios need evidence. Rows without it stay in the per-session

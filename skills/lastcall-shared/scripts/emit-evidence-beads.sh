@@ -51,6 +51,10 @@ sid="$(printf '%s' "$meter" | jq -r '.session.id // empty')"
 cwd="$(printf '%s' "$meter" | jq -r '.session.cwd // empty')"
 started="$(printf '%s' "$meter" | jq -r '.session.started // empty')"
 ended="$(printf '%s' "$meter" | jq -r '.session.ended // empty')"
+# Activity spans, when the meter recorded them. An empty list means the meter
+# predates them, and every join then reports the weaker "window" tier rather
+# than silently claiming span strength it cannot support.
+spans="$(printf '%s' "$meter" | jq -c '.session.spans // []')"
 
 [ -n "$sid" ] || { echo "emit-evidence-beads: no session id on stdin" >&2; exit 1; }
 
@@ -160,7 +164,7 @@ fi
 # from the typo. Write "the row", never the possessive form.
 out="$(printf '%s' "$issues" | jq -c \
   --arg sid "$sid" --arg started "$started" --arg ended "$ended" \
-  --argjson commits "$commits" '
+  --argjson commits "$commits" --argjson spans "$spans" '
   # Timestamps may carry milliseconds, which fromdateiso8601 rejects.
   def ts: if . == null or . == "" then null
           else (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) end;
@@ -191,6 +195,23 @@ out="$(printf '%s' "$issues" | jq -c \
          elif $i.status == "in_progress" then $b0
          else null end) as $at
       | select($at != null and $t0 != null and $t1 != null and $at >= $t0 and $at <= $t1)
+
+      # HOW this bead was joined to the session, strongest first. The window is
+      # a loose proxy: a session idle for six hours has a window covering that
+      # gap but no activity in it, and measured across 60 local transcripts
+      # windows of 409h and 313h carry near-zero activity. A transition inside
+      # a real activity span is a much stronger claim than one that merely
+      # falls between the first and last timestamp.
+      #
+      # A window-only match is NOT dropped. It would turn an over-claim into a
+      # silent under-claim, which is worse here: a bead closed during an idle
+      # gap -- the user walks away after bd close, or it is closed from a plain
+      # CLI or another session -- would then be claimed by nobody at all. So
+      # the weaker tier is recorded and stays visible, the same way the commit
+      # join keys tier rather than discard.
+      | (if ($spans | length) == 0 then "window"
+         elif any($spans[]; $at >= .[0] and $at <= .[1]) then "span"
+         else "window" end) as $join
 
       # JOIN KEYS, strongest first. An EXACT match is a commit that names the
       # bead: its id, or the tracker ref that bd records in external_ref, which
@@ -226,6 +247,11 @@ out="$(printf '%s' "$issues" | jq -c \
           # it in a new field, which contract 2 allows and consumers ignore.
           artifacts:        [ $matches[] | .ref ],
           artifact_matches: $matches,
+          # span: the transition landed inside real session activity.
+          # window: it only fell between the first and last timestamp, so the
+          # session may have been idle at the time. Absent on files written
+          # before spans existed, which is UNKNOWN, not "window".
+          session_join: $join,
           notes: ($i.close_reason // null)
         }
     )

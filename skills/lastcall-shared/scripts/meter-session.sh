@@ -354,6 +354,25 @@ meter_file() {
                | ($ts[$i] - $ts[$i-1]) | select(. <= $gap) ] | add // 0 end
       ) as $active
 
+    # The SAME bucketing, kept as intervals instead of summed away. A session
+    # window is a wildly loose proxy for when the session was working: measured
+    # across 60 local transcripts, windows of 409h and 313h carry near-zero
+    # activity. Anything joining an event to a session by window alone inherits
+    # that looseness, so the spans are emitted rather than discarded.
+    #
+    # sum(spans) == active_s by construction, which verify.sh pins -- the two
+    # must never drift, or the join and the reported active time would be
+    # describing different sessions.
+    #
+    # A lone timestamp yields a zero-length span rather than nothing: the
+    # session WAS active at that instant, and dropping it would make a
+    # single-turn session look like it never ran.
+    | ( reduce range(0; $ts|length) as $i ([];
+          if $i == 0 or ($ts[$i] - $ts[$i-1]) > $gap
+          then . + [[$ts[$i], $ts[$i]]]
+          else (.[0:-1] + [[.[-1][0], $ts[$i]]]) end)
+      ) as $spans
+
     # Claude Code writes one turn_duration record per COMPLETED user turn. It is
     # its own measure of how long the agent was busy, with no idle heuristic in
     # it — but the turn in flight has not been written yet, so this undercounts
@@ -536,6 +555,7 @@ meter_file() {
         ai_title: (map(select(.type == "ai-title") | .aiTitle // empty) | last),
         dedup: ($dedup + $adjdup),
         first_ts: ($ts | first), last_ts: ($ts | last), active_s: $active,
+        spans: $spans,
         agent_s:     (($td | map(.durationMs) | add // 0) / 1000),
         agent_turns: ($td | length),
         # Grouped by the dimensions that change what a request BILLS at. speed
@@ -686,6 +706,23 @@ meter_file() {
         # straddles the two files, which is the rename itself — seconds, and in
         # the conservative direction.
         active_s: (map(select(.lane=="main") | .active_s) | add // 0),
+        # When the session was actually WORKING, as [start, end] epoch pairs.
+        # Main lanes only, for the same reason active_s is: subagents run
+        # concurrently and their spans would double-count the same minutes.
+        #
+        # Merged across the main lanes of a split session, because a rename
+        # produces two files whose spans are separate lists but one timeline.
+        # Overlapping or touching intervals are coalesced so a consumer can
+        # treat the list as disjoint and ascending -- otherwise a containment
+        # test would have to sort it first, and every caller would have to
+        # remember to.
+        spans:
+          ( [ .[] | select(.lane == "main") | .spans[]? ]
+            | sort_by(.[0])
+            | reduce .[] as $sp ([];
+                if (length == 0) or ($sp[0] > (.[-1][1]))
+                then . + [$sp]
+                else (.[0:-1] + [[.[-1][0], ([.[-1][1], $sp[1]] | max)]]) end) ),
         # Native agent-busy time. Only the main thread emits turn_duration, and
         # only for turns that have ENDED, so this is a floor: a session metered
         # mid-turn is missing the turn being metered.
