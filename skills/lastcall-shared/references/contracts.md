@@ -505,6 +505,14 @@ the session commit SHAs as arguments, and writes one file per run:
   nothing saying why — the inverse of `files_coverage.attributed` and the rest
   of the absence-is-visible discipline here. A bad SHA degrades grounding; it
   does not lose the evidence file.
+- **Completed tasks with zero artifacts warn once**, and the warning names the
+  cause rather than the symptom: no SHAs reached the producer, none of the ones
+  passed resolve, or none of the resolved commits names a bead id. A commit
+  grounds a task by naming its id in the message, which is what a
+  `Closes <bead-id>` trailer does. Both commit discovery and any external
+  producer are best effort, so the file can look healthy while every task in it
+  reports `unverified` with nothing saying why; this closes that silent-failure
+  mode. Non-fatal — the evidence file is still emitted.
 - The workspace is found by walking up from the session `cwd`, falling back to
   `$PWD` when the recorded path no longer exists — a renamed directory leaves
   every later row pointing at a path that is gone (5 of 26 sessions here).

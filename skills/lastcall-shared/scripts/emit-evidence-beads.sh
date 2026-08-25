@@ -124,6 +124,31 @@ out="$(printf '%s' "$issues" | jq -c \
 count="$(printf '%s' "$out" | jq '.tasks | length')"
 [ "$count" -gt 0 ] || exit 0
 
+# Completed work that nothing points at is the silent failure of this producer:
+# the evidence file looks healthy, and every task inside it reports unverified
+# with nothing saying why. Both commit discovery and any external producer are
+# best effort, so name the cause once on stderr and continue. Symmetrical with
+# the unresolvable-SHA report above, and non-fatal for the same reason: a gap in
+# grounding should be visible, not cost the evidence file.
+read -r n_done n_art <<<"$(printf '%s' "$out" | jq -r '
+  . as $o
+  | ([ $o.tasks[] | select(.status == "completed") ] | length) as $d
+  | ([ $o.tasks[].artifacts[] ] | length) as $a
+  | "\($d) \($a)"')"
+
+if [ "$n_done" -gt 0 ] && [ "$n_art" -eq 0 ]; then
+  n_passed="$#"
+  n_resolved="$(printf '%s' "$commits" | jq 'length')"
+  if [ "$n_passed" -eq 0 ]; then
+    why="no commit SHAs reached this producer"
+  elif [ "$n_resolved" -eq 0 ]; then
+    why="none of the $n_passed SHAs passed resolve in $cwd"
+  else
+    why="none of the $n_resolved commits in the session window names a bead id"
+  fi
+  echo "emit-evidence-beads: $n_done completed tasks, 0 artifacts. ${why}. A commit grounds a task by naming its bead id in the message, which is what the Closes <bead-id> trailer does. Grounding for this session is unmeasured, not absent." >&2
+fi
+
 mkdir -p "$EVIDENCE/$sid"
 path="$EVIDENCE/$sid/beads-$(date -u +%Y%m%dT%H%M%SZ).json"
 printf '%s\n' "$out" > "$path"
