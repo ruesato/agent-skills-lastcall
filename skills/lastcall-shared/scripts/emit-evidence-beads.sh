@@ -138,10 +138,23 @@ out="$(printf '%s' "$issues" | jq -c \
   | (if type == "object" then (.issues // []) else . end)
   | map(
       . as $i
+      # started_at is NOT reliably present. bd omits the key entirely from most
+      # rows — 46 of 85 in this workspace, measured 2026-08-24 — and jq yields
+      # null for a missing key, so an in_progress bead with no start timestamp
+      # failed the window select and could never be counted as partial at all.
+      # Closed beads were unaffected because they read closed_at instead.
+      #
+      # updated_at is the closest thing bd guarantees. It moves on the status
+      # change that made the bead in_progress, so it is a real transition time,
+      # only a coarser one: any later edit drags it forward. It is used for
+      # INCLUSION and for the range start below, never reported as the start
+      # time — the started field keeps whatever bd actually recorded, so a null
+      # there still says the start was never observed rather than asserting one.
+      | (($i.started_at | ts) // ($i.updated_at | ts)) as $b0
       # A bead counts for this session only if the transition that makes it
       # evidence happened inside the metered window.
-      | (if   $i.status == "closed"      then ($i.closed_at  | ts)
-         elif $i.status == "in_progress" then ($i.started_at | ts)
+      | (if   $i.status == "closed"      then ($i.closed_at | ts)
+         elif $i.status == "in_progress" then $b0
          else null end) as $at
       | select($at != null and $t0 != null and $t1 != null and $at >= $t0 and $at <= $t1)
 
@@ -159,7 +172,6 @@ out="$(printf '%s' "$issues" | jq -c \
                key: (if (.msg | contains($i.id)) then "id" else "tracker" end) }
          ]) as $exact
       # An open bead has no closed_at, so its range ends at the session end.
-      | ($i.started_at | ts) as $b0
       | ((if $i.status == "closed" then $i.closed_at else $ended end) | ts) as $b1
       | ([ $commits[]
            | select($b0 != null and $b1 != null and .at >= $b0 and .at <= $b1)

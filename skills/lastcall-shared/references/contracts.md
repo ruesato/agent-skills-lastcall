@@ -499,6 +499,14 @@ discovers the session commits itself, and writes one file per run:
 
 - A bead closed inside `[started, ended]` becomes `completed`; one moved to
   `in_progress` in that window becomes `partial`; `blocked` maps through.
+- **`started_at` is not reliably present** — bd omits the key from most rows
+  (46 of 85 in this workspace, 2026-08-24), and jq reads a missing key as
+  `null`, so an `in_progress` bead with no start timestamp used to fail the
+  window test and vanish from the file entirely. `updated_at` is the fallback:
+  it moves on the status change that made the bead `in_progress`, so it is a
+  real transition time, only a coarser one. It decides inclusion and bounds the
+  range below; the emitted `started` still carries whatever bd recorded, so a
+  `null` there says the start was never observed rather than asserting one.
 - **Session commits are discovered from the metered window**, and any SHAs
   passed as arguments are unioned in and deduped. Discovery exists because
   `lastcall` offers its commit delegation only on a dirty tree: a session whose
@@ -514,9 +522,10 @@ discovers the session commits itself, and writes one file per run:
 
   A bead with any exact match uses only those, so an earned commit is never
   diluted by everything committed beside it; `window` applies only when no
-  exact match exists, and only when the bead carries a `started_at` to bound
-  it. File overlap was considered as a fourth key and rejected: the meter does
-  not see edits made through Bash, so absence there proves nothing.
+  exact match exists. That range starts at `started_at`, or at the `updated_at`
+  fallback above when bd recorded none. File overlap was considered as a fourth
+  key and rejected: the meter does not see edits made through Bash, so absence
+  there proves nothing.
 
   Do NOT look for a `Closes <ref>` trailer in a Fathom commit. Its
   `conventions.md` puts that line in the REVIEW body; its commit-message

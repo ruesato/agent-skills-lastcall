@@ -815,6 +815,74 @@ if command -v bd >/dev/null 2>&1; then
   rm -rf "$GROOT"
 fi
 
+# 3f. An in_progress bead whose started_at is absent. bd omits that key
+# entirely from most rows — 46 of 85 in the lastcall workspace, measured
+# 2026-08-24 — and jq returns null for a missing key, so the window select used
+# to drop the bead outright: a claimed-but-unfinished task could never be
+# reported as partial, and the evidence file looked complete without it. Closed
+# beads were never affected, because they read closed_at instead. The fallback
+# is updated_at, which also supplies the range start the window key needs.
+#
+# bd import is the only way to build the row, since bd update --status
+# in_progress stamps started_at itself. Skipped, not failed, when bd is absent.
+if command -v bd >/dev/null 2>&1; then
+  VROOT="$(mktemp -d "$TMP/lastcall-nostart.XXXXXX")"
+  (
+    cd "$VROOT" || exit 1
+    git init -q . && git config user.email v@v.test && git config user.name V
+    bd init --prefix vy >/dev/null 2>&1 || exit 1
+    vu="$(date -u -r $(( $(date +%s) - 60 )) +%Y-%m-%dT%H:%M:%SZ)"
+    printf '{"title":"P","status":"in_progress","issue_type":"task","priority":2,"updated_at":"%s"}\n' \
+      "$vu" | bd import - >/dev/null 2>&1 || exit 1
+    # Read the row back rather than trust what import stored. The test only
+    # means anything while started_at is genuinely absent, and the commit below
+    # has to land on the timestamp bd actually kept.
+    bd list --all --limit 0 --json --skip-labels 2>/dev/null \
+      | jq -r '(if type == "object" then (.issues // []) else . end)
+               | map(select(.status == "in_progress"))[0]
+               | "\(.id) \((has("started_at")) and (.started_at != null)) \(.updated_at)"' > row
+    read -r vid vhas vupd < row
+    [ -n "$vid" ] && [ -n "$vupd" ] && [ "$vupd" != "null" ] || exit 1
+    # Stamped exactly at updated_at, which the inclusive range bound accepts.
+    echo p > f; git add f
+    GIT_COMMITTER_DATE="$vupd" git commit -q --date="$vupd" -m "chore: inside the range"
+  )
+  if [ -s "$VROOT/row" ]; then
+    read -r vid vhas vupd < "$VROOT/row"
+    if [ "$vhas" = "true" ]; then
+      say "  no-started_at fixture skipped (bd now stamps started_at on import)"
+    else
+      vt0="$(date -u -r $(( $(date +%s) - 3600 )) +%Y-%m-%dT%H:%M:%SZ)"
+      vt1="$(date -u -r $(( $(date +%s) + 3600 )) +%Y-%m-%dT%H:%M:%SZ)"
+      vmeter="$(jq -cn --arg cwd "$VROOT" --arg t0 "$vt0" --arg t1 "$vt1" \
+        '{session: {id: "fixture-no-started-at", cwd: $cwd, branch: "main",
+                    started: $t0, ended: $t1, active_s: 1},
+          tokens: [], agents: [], work: {tools: {}, files: {}, skills: []},
+          friction: {tool_errors: 0, interrupts: 0, denials: 0}, evidence: []}')"
+      vout="$(printf '%s' "$vmeter" | LASTCALL_EVIDENCE_DIR="$VROOT/evidence" \
+              "$S/emit-evidence-beads.sh" 2>/dev/null)"
+      # started stays null on the way out: updated_at decides inclusion, it does
+      # not get reported as a start time nobody observed.
+      if [ -s "$vout" ] && jq -e --arg i "$vid" '
+            (.tasks | map(select(.id == $i))) as $t
+            | ($t | length) == 1
+              and ($t[0].status == "partial")
+              and ($t[0].started == null)' "$vout" >/dev/null 2>&1
+      then ok; else bad "in_progress bead with absent started_at was dropped from the evidence file"; fi
+      # The same fallback gives the bead a range start, so the window key can
+      # still ground it. Only the keys are pinned, not the count: bd init writes
+      # a commit of its own that falls in the same range.
+      if [ -s "$vout" ] && jq -e --arg i "$vid" '
+            [.tasks[] | select(.id == $i) | .artifact_matches[].key] as $k
+            | ($k | length) >= 1 and ($k | all(. == "window"))' "$vout" >/dev/null 2>&1
+      then ok; else bad "in_progress bead with absent started_at earned no window grounding"; fi
+    fi
+  else
+    say "  no-started_at fixture skipped (bd workspace not created)"
+  fi
+  rm -rf "$VROOT"
+fi
+
 say "  fixtures checked"
 
 # ---------------------------------------------------------------- result
