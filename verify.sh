@@ -940,16 +940,52 @@ if LASTCALL_LEDGER="$LJ4.none" "$S/ledger.sh" trend | jq -e '
       ([.window_overlaps[].session_id] | sort == ["a","b","c","env"])
       and (.per_task == null)' >/dev/null 2>&1
 then ok; else bad "a ledger with no spans did not fall back to the window overlap test"; fi
-# The basis says WHICH test produced the answer, so two ledgers can be compared.
 if LASTCALL_LEDGER="$LJ4.none" "$S/ledger.sh" trend a | jq -e '
       .focus.window_overlap == ["env"]' >/dev/null 2>&1
 then ok; else bad "a span-less row did not fall back to the window for its own overlap"; fi
+# The basis says WHICH test produced the answer, and it has to REACH the reader
+# -- it was computed and dropped from every projection for a release, so the
+# reader who needed it was the one who could not find it. Asserted on all three
+# surfaces: the per-row list, the focus block, and the ledger-wide counts.
+if LASTCALL_LEDGER="$LJ4" "$S/ledger.sh" trend | jq -e '
+      (.window_overlaps | length) > 0
+      and all(.window_overlaps[]; .basis == "activity spans")
+      and .overlap_regimes
+          == {spans_recorded: 4, spans_missing: 0, window_unreadable: 0}' >/dev/null 2>&1
+then ok; else bad "trend did not report the overlap basis on a ledger where every row carries spans"; fi
+if LASTCALL_LEDGER="$LJ4.none" "$S/ledger.sh" trend | jq -e '
+      all(.window_overlaps[]; .basis | test("^session window"))
+      and .overlap_regimes.spans_missing == 4
+      and (.overlap_regimes.note | test("re-meter"; "i"))' >/dev/null 2>&1
+then ok; else bad "a ledger of span-less rows did not disclose that its overlaps rest on the window fallback"; fi
+# The migration signal has to land where the reader asks why the count is what
+# it is, or the upgrade reads as a no-op: same exclusions, same per_task, and
+# nothing saying the tighter test has not run yet.
+if LASTCALL_LEDGER="$LJ4.none" "$S/ledger.sh" trend | jq -e '
+      .per_task_basis | test("record no activity spans")' >/dev/null 2>&1
+then ok; else bad "per_task_basis excluded rows on the window fallback without saying so"; fi
+if LASTCALL_LEDGER="$LJ4" "$S/ledger.sh" trend | jq -e '
+      (.per_task_basis | test("record no activity spans")) | not' >/dev/null 2>&1
+then ok; else bad "per_task_basis warned about a pending span test on a ledger that already has spans"; fi
+if LASTCALL_LEDGER="$LJ4.none" "$S/ledger.sh" trend a | jq -e '
+      .focus.window_overlap_basis | test("^session window")' >/dev/null 2>&1
+then ok; else bad "the focus block did not say which test produced its overlap"; fi
 # MIXED: the fallback is per PAIR, not per ledger. a has no spans, so env-a
 # falls back and is flagged, while env-b still uses spans and is not.
 jq -c 'if .session_id == "a" then del(.spans) else . end' "$LJ4" > "$LJ4.m"
 if LASTCALL_LEDGER="$LJ4.m" "$S/ledger.sh" trend | jq -e '
       ((.window_overlaps[] | select(.session_id == "env") | .overlaps | sort) == ["a","c"])' >/dev/null 2>&1
 then ok; else bad "a mixed ledger did not fall back per pair"; fi
+# And the basis must say so per pair too. env CARRIES spans, so a per-row test
+# would call its answer "activity spans" -- but the env-a comparison fell back,
+# and claiming the tighter test there is exactly the over-claim this field
+# exists to prevent.
+if LASTCALL_LEDGER="$LJ4.m" "$S/ledger.sh" trend | jq -e '
+      ((.window_overlaps[] | select(.session_id == "env") | .basis) | test("^mixed"))
+      and ((.window_overlaps[] | select(.session_id == "a") | .basis)
+           | test("^session window"))
+      and .overlap_regimes.spans_missing == 1' >/dev/null 2>&1
+then ok; else bad "a row with spans claimed the span test for a comparison that fell back to the window"; fi
 rm -rf "$LROOT4"
 
 rm -rf "$LROOT2"

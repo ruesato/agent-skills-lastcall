@@ -1035,7 +1035,26 @@ build one from.
     the pair falls back to the window — a *superset* of the activity, so the
     fallback can only over-report, never under-report — and
     `window_overlap_basis` says which test produced the answer. The fallback
-    is per **pair**, not per ledger.
+    is per **pair**, not per ledger, and so is the basis: a row that carries
+    spans but is compared against one that does not reads `mixed`, naming both
+    counts. Reporting `activity spans` there on the strength of the row own
+    `spans` would claim the tighter test for a comparison that fell back.
+  - **The basis has to reach the reader, and it is also the migration
+    signal.** `spans` are written at `append` time, so a ledger of rows
+    written before spans existed keeps falling back until those rows are
+    re-metered and re-appended — and until then the upgrade changes nothing:
+    same exclusions, same `per_task`. Measured on an external 18-row ledger
+    (2026-08-25): re-metering halved the overlapped rows from 10 to 5, took
+    `per_task.rows` from 3 to 7, and moved `usd_median` from 13.71 to 7.42.
+    So the basis is emitted on every surface that shows an overlap —
+    `window_overlaps[].basis`, `focus.window_overlap_basis` — counted
+    ledger-wide in **`overlap_regimes`** (`spans_recorded`, `spans_missing`,
+    `window_unreadable`, plus a `note` naming the re-meter whenever any row
+    lacks spans), and named in `per_task_basis` whenever a fallback actually
+    affected an exclusion. It was computed and dropped from every projection
+    for one release, which is the failure this rule exists to prevent: the
+    reader who needed to know whether the tighter test was available was
+    exactly the reader who could not find out.
   - An unreadable window yields `null`, not `[]`. That is *unknown* overlap,
     and it is excluded from the ratios rather than trusted into them — the
     same absent-is-not-zero rule as everywhere else in this section.

@@ -259,25 +259,48 @@ cmd_trend() {
     | def ivx($a; $b): any($a[]; . as $x | any($b[]; $x[0] <= .[1] and .[0] <= $x[1]));
       ($stamped | map(
         . as $r
+        # The rows this one is actually compared AGAINST. Named, because the
+        # basis below has to describe the tests that ran, and which test runs
+        # depends on what the peer carries as much as on what this row does.
+        | ($stamped | map(select(.session_id != $r.session_id
+                                 and .cwd == $r.cwd
+                                 and ._t0 != null and ._t1 != null))) as $peers
+        | ($peers | map(select(((.spans // []) | length) == 0)) | length) as $nospan
         | . + { window_overlap:
                  # null, not [], when the window is unreadable. That is
                  # UNKNOWN overlap, and it must not read as "disjoint".
                  (if $r._t0 == null or $r._t1 == null then null
-                  else [ $stamped[]
-                         | select(.session_id != $r.session_id
-                                  and .cwd == $r.cwd
-                                  and ._t0 != null and ._t1 != null
-                                  and (if (($r.spans // []) | length) > 0
-                                          and ((.spans   // []) | length) > 0
-                                       then ivx($r.spans; .spans)
-                                       else (._t0 <= $r._t1 and ._t1 >= $r._t0) end))
+                  else [ $peers[]
+                         | select(if (($r.spans // []) | length) > 0
+                                     and ((.spans   // []) | length) > 0
+                                  then ivx($r.spans; .spans)
+                                  else (._t0 <= $r._t1 and ._t1 >= $r._t0) end)
                          | .session_id ]
                   end),
                 # Which test produced that answer. A reader comparing two
-                # ledgers needs to know whether the tighter one was available.
+                # ledgers needs to know whether the tighter one was available,
+                # and an UPGRADING reader needs to know whether it is still
+                # pending: spans live on the row and are written at append
+                # time, so a ledger of older rows keeps falling back until it
+                # is re-metered. Emitted in window_overlaps, in the focus
+                # block, and counted in overlap_regimes -- computing it and
+                # then dropping it left the one reader who needed it with no
+                # way to find out.
+                #
+                # Reports the tests that actually RAN, not merely whether this
+                # row carries spans. The fallback is per PAIR: a row with spans
+                # compared against one without still falls back, and calling
+                # that "activity spans" would over-claim the tighter test.
                 window_overlap_basis:
-                 (if (($r.spans // []) | length) > 0 then "activity spans"
-                  else "session window (spans not recorded)" end) }
+                 (if $r._t0 == null or $r._t1 == null
+                  then "not tested (this session window could not be read)"
+                  elif ($peers | length) == 0
+                  then "no other session in this workspace to compare against"
+                  elif (($r.spans // []) | length) == 0
+                  then "session window (spans not recorded on this row)"
+                  elif $nospan == 0 then "activity spans"
+                  else "mixed — activity spans against \(($peers | length) - $nospan) session(s), session window against \($nospan) with no spans recorded"
+                  end) }
         | del(._t0, ._t1))) as $all
 
     # Per-task ratios need evidence. Rows without it stay in the per-session
@@ -355,7 +378,31 @@ cmd_trend() {
         window_overlaps:
           ([ $all[]
              | select(.window_overlap != null and (.window_overlap | length) > 0)
-             | { session_id, cwd, overlaps: .window_overlap } ]),
+             | { session_id, cwd, overlaps: .window_overlap,
+                 # Which test produced this row answer. An exclusion resting on
+                 # the window fallback is not the same finding as one the span
+                 # test confirmed, and the reader cannot tell them apart from
+                 # the id list alone.
+                 basis: .window_overlap_basis } ]),
+
+        # The migration signal. Span-based overlap needs the row to CARRY
+        # spans, and spans are written at append time, so upgrading changes
+        # nothing at all until the rows are re-metered and re-appended. With
+        # this field absent the upgrade reads as a no-op -- same exclusions,
+        # same per_task, and nothing in the output saying the tighter test is
+        # still pending. Same shape as pricing_regimes and meter_regimes
+        # below, one layer further down: a step in this trend can come from
+        # the TEST changing rather than from the work changing.
+        overlap_regimes:
+          (($all | map(select(.window_overlap != null))) as $tested
+           | { spans_recorded:
+                 ($tested | map(select(((.spans // []) | length) > 0)) | length),
+               spans_missing:
+                 ($tested | map(select(((.spans // []) | length) == 0)) | length),
+               window_unreadable: (($all | length) - ($tested | length)) }
+           | . + (if .spans_missing > 0
+                  then { note: "\(.spans_missing) row(s) record no activity spans, so every comparison involving them falls back to the session window — a superset of the activity, which can only over-report overlap. Re-meter and re-append those rows to apply the tighter test; until then some exclusions here are pending rather than settled." }
+                  else {} end)),
 
         # A null per_task used to mean three different things at once, and the
         # reader could not tell which: no producer exists in these workspaces,
@@ -378,7 +425,15 @@ cmd_trend() {
            | ($clean | map(select((.evidence.unverified // null) == null)) | length) as $unkgr
            | ($grounded | map(.evidence.completed) | add // 0) as $tot
            | ($grounded | map(.evidence.unverified) | add // 0) as $ung
-           | "\($grounded|length) row(s) with a grounded completion and a window no other session overlaps, \($ovl) excluded for overlapping another session in the same workspace, \($unk) excluded for an unreadable window, \($nogr) excluded for no grounded completion, \($unkgr) excluded for an unreadable grounding count, \($empty) where a producer ran and matched none, \($noev) not assessed — denominator is grounded completions, \($ung) of \($tot) completions in these rows excluded as unverified"),
+           | ($all | map(select(((.spans // []) | length) == 0)) | length) as $nospan
+           | "\($grounded|length) row(s) with a grounded completion and a window no other session overlaps, \($ovl) excluded for overlapping another session in the same workspace, \($unk) excluded for an unreadable window, \($nogr) excluded for no grounded completion, \($unkgr) excluded for an unreadable grounding count, \($empty) where a producer ran and matched none, \($noev) not assessed — denominator is grounded completions, \($ung) of \($tot) completions in these rows excluded as unverified"
+             # The overlap exclusions above are only as tight as the test that
+             # produced them, and that test is still the wide one wherever a
+             # row predates spans. Said HERE because this is where a reader
+             # asks why the count is what it is.
+             + (if $ovl > 0 and $nospan > 0
+                then " — \($nospan) of these rows record no activity spans, so some overlap exclusions rest on the wider window test and may lift on a re-meter (see overlap_regimes)"
+                else "" end)),
 
         pricing_sources: ($all | map(.cost.pricing_source) | unique),
 
@@ -449,6 +504,10 @@ cmd_trend() {
               usd: $s.cost.usd,
               # null means the window was unreadable, so overlap is UNKNOWN.
               window_overlap: $s.window_overlap,
+              # And which test produced it. Same reason as window_overlaps
+              # above: an overlap found by the wide window test may not
+              # survive a re-meter, and the id list alone does not say.
+              window_overlap_basis: $s.window_overlap_basis,
               vs_median_usd:
                 (($peers | map(.cost.usd) | pct(0.5)) as $m
                  | if $m == null or $m == 0 or ($peers | length) < 5 then null

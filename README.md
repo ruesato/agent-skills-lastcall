@@ -271,6 +271,16 @@ replaces the row keyed on `session_id` alone. What it needs:
   Producing into one drop-box and appending from another is the failure this
   recipe exists to fix, spelled differently.
 
+The same recipe is also how you **apply a newer overlap test to old rows**.
+`ledger.sh trend` narrows the overlap test from the session window to actual
+activity spans, but `spans` are written onto the row at `append` time, so rows
+written before spans existed keep falling back to the window and the change
+looks like a no-op — same exclusions, same `per_task`. `overlap_regimes` in the
+trend output counts which rows are in which state and says so in a `note`, and
+`window_overlaps[].basis` names the test per row. Re-meter and re-append those
+rows to move them over; on one 18-row ledger that halved the overlapped rows
+and more than doubled the rows qualifying for `per_task`.
+
 Re-derivation is honest, not generous: only beads whose transition falls inside
 the session's recorded window come back. A session that closed nothing still
 gets an evidence file, carrying an empty `tasks` array. That marker is the
