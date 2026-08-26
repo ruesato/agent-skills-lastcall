@@ -1649,6 +1649,80 @@ if printf '{"session":{"cwd":"%s"}}' "$OLC" | "$S/openloops.sh" 2>/dev/null \
 then ok; else bad "openloops errored or misreported on a clean tree"; fi
 rm -rf "$OLR" "$OLC"
 
+# 11. Cross-WORKSPACE task claims, at runtime. window_overlap is scoped per
+# cwd, correctly — two workspaces read different bead databases. But task ids
+# are not globally unique and the drop-box is keyed on session id ALONE, so
+# evidence from two workspaces lands in one directory and a shared id is
+# counted by both rows with nothing excluding or flagging it. The invariant was
+# asserted only by crossrow_dupes below, as a test fixture, never by trend at
+# wrap-up where a user would meet it.
+XWS="$(mktemp -d "$TMP/lastcall-xws.XXXXXX")"
+mkdir -p "$XWS/ev/x-one" "$XWS/ev/x-two" "$XWS/ev/x-three"
+# Windows and spans are DISJOINT per row, so no row is excluded for overlap and
+# per_task draws on all three. That is what lets the assertion below distinguish
+# disclosure from exclusion — overlapping rows would be dropped for the other
+# reason and the check would pass without asserting anything.
+xws_row() { jq -cn --arg sid "$1" --arg cwd "$2" --argjson h "$3" \
+  '($h * 3600) as $off
+   | {schema:"lastcall.ledger/1", session_id:$sid, cwd:$cwd, branch:"main",
+      started: ((1785888000 + $off) | todateiso8601),
+      ended:   ((1785891600 + $off) | todateiso8601),
+      metered_at: ((1785891600 + $off) | todateiso8601),
+      spans: [[(1785888000 + $off), (1785891600 + $off)]],
+      cost:{usd:1, pricing_source:"fixture"}, active_s:600, tokens:[],
+      work:{tool_calls:10, files_changed:1, commits:[]},
+      friction:{tool_errors:0, interrupts:0, denials:0},
+      evidence:{sources:["beads"], completed:2, partial:0, blocked:0,
+                abandoned:0, unverified:0}}'; }
+xws_ev()  { jq -cn --arg sid "$1" --arg id "$2" \
+  '{schema:"lastcall.evidence/1", source:"beads", session_id:$sid,
+    emitted_at:"2026-08-01T01:00:00Z",
+    tasks:[{id:$id, title:"t", status:"completed", artifacts:["commit:abc"]}]}'; }
+xws_row x-one   /repo/alpha 0 >  "$XWS/ledger.jsonl"
+xws_row x-two   /repo/beta  2 >> "$XWS/ledger.jsonl"
+xws_row x-three /repo/alpha 4 >> "$XWS/ledger.jsonl"
+xws_trend() { LASTCALL_LEDGER="$XWS/ledger.jsonl" LASTCALL_EVIDENCE_DIR="${1:-$XWS/ev}" \
+                "$S/ledger.sh" trend 2>/dev/null; }
+# Two workspaces, one task id. The check must be able to FAIL, so plant it.
+xws_ev x-one   "#123" > "$XWS/ev/x-one/beads.json"
+xws_ev x-two   "#123" > "$XWS/ev/x-two/beads.json"
+xws_ev x-three "#999" > "$XWS/ev/x-three/beads.json"
+if xws_trend | jq -e '(.cross_workspace_claims | length) == 1
+      and .cross_workspace_claims[0].task == "#123"
+      and (.cross_workspace_claims[0].workspaces | sort) == ["/repo/alpha","/repo/beta"]
+      and (.cross_workspace_claims[0].sessions   | sort) == ["x-one","x-two"]' >/dev/null 2>&1
+then ok; else bad "trend did not report a task claimed across two workspaces"; fi
+# It has to reach the prose too, or a reader of per_task never learns the
+# ratio they are looking at may be double-counting.
+if xws_trend | jq -e '.per_task_basis | test("DIFFERENT workspaces")' >/dev/null 2>&1
+then ok; else bad "per_task_basis did not disclose the cross-workspace claim"; fi
+# Disclosure, NOT exclusion: the rows stay in per_task. Excluding would move
+# the baseline on a signal nobody has observed in the wild.
+if xws_trend | jq -e '.per_task.rows == 3' >/dev/null 2>&1
+then ok; else bad "a cross-workspace claim silently changed which rows per_task used"; fi
+# Same workspace sharing an id is window_overlap territory, not this. Reporting
+# it here would double-count the disclosure and train the reader to skip it.
+xws_ev x-three "#123" > "$XWS/ev/x-three/beads.json"
+xws_ev x-two   "#777" > "$XWS/ev/x-two/beads.json"
+if xws_trend | jq -e '.cross_workspace_claims == []' >/dev/null 2>&1
+then ok; else bad "trend reported a same-workspace shared id as a cross-workspace claim"; fi
+# A task with no id must not manufacture a shared claim: null is a valid group
+# key, so two producers that each simply forgot the field would look like one
+# task claimed twice.
+jq -cn '{schema:"lastcall.evidence/1", source:"beads", session_id:"x-one",
+         emitted_at:"2026-08-01T01:00:00Z",
+         tasks:[{title:"no id", status:"completed", artifacts:[]}]}' > "$XWS/ev/x-one/beads.json"
+jq -cn '{schema:"lastcall.evidence/1", source:"beads", session_id:"x-two",
+         emitted_at:"2026-08-01T01:00:00Z",
+         tasks:[{title:"none here either", status:"completed", artifacts:[]}]}' > "$XWS/ev/x-two/beads.json"
+if xws_trend | jq -e '.cross_workspace_claims == []' >/dev/null 2>&1
+then ok; else bad "two id-less tasks were reported as one task claimed twice"; fi
+# And a missing drop-box is an empty answer, not a crash — trend runs on every
+# wrap-up and most ledgers have no evidence for most rows.
+if xws_trend "$XWS/absent" | jq -e '.cross_workspace_claims == [] and .sessions == 3' >/dev/null 2>&1
+then ok; else bad "trend failed when the evidence drop-box does not exist"; fi
+rm -rf "$XWS"
+
 say "  fixtures checked"
 
 # ---------------------------------------------------------------- result

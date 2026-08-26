@@ -1049,7 +1049,23 @@ build one from.
     either sees no envelope row at all or a stale one. Only `trend` sees every
     row at once, and it recomputes on each call, so it cannot go stale.
   - It is scoped by **cwd**. Two sessions in different workspaces read
-    different bead databases and cannot be claiming the same task.
+    different bead databases and cannot be claiming the same task. That leaves
+    one axis it cannot reach, which **`cross_workspace_claims`** covers
+    instead: a `task.id` is not globally unique (section 2), and the drop-box
+    is keyed on session id *alone*, so evidence from two workspaces genuinely
+    lands in one directory and a shared id is counted by both rows. `trend`
+    reads the drop-box for the sessions the ledger has rows for, reports every
+    id claimed from more than one `cwd` under `cross_workspace_claims` with
+    its workspaces and sessions, and names the count in `per_task_basis`.
+    Those rows are **disclosed, not excluded** — excluding would move the
+    baseline on a signal nobody has yet observed in the wild, and surfacing
+    rather than folding is the rule this section keeps everywhere else.
+    Exclusion is the follow-up if the disclosed case turns out to be common.
+    Ids are read only from tasks that *have* one: `null` is a valid group key,
+    so counting id-less tasks would manufacture a shared claim between two
+    producers that each simply omitted the field. Until 2026-08-25 this
+    invariant was asserted only by `verify.sh`, as a planted fixture, and never
+    at wrap-up time where a user would meet it.
   - It tests **activity, not the bare window**, whenever both rows carry
     `spans`. A session left open across a break has a window covering the
     whole break and no activity in it; a window test calls that an overlap and

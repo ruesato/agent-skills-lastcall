@@ -91,6 +91,38 @@ evidence_for() {
       }' "${ok[@]}"
 }
 
+# Task ids claimed by each session, read from the DROP-BOX rather than from the
+# ledger. A ledger row carries evidence COUNTS and not the task ids, so the ids
+# exist nowhere else, and cmd_trend needs them to see a claim that crosses a
+# workspace boundary.
+#
+# Limited to sessions the ledger has a row for, which bounds the read to the
+# size of the baseline instead of the size of the drop-box, and skips evidence
+# for sessions that were never appended. Unparseable files are skipped with a
+# warning, the same as evidence_for. A task with no id is skipped rather than
+# folded in: null is a valid group key, so keeping it would manufacture a
+# shared claim between two producers that each simply forgot the field.
+dropbox_claims() {
+  local sids="$1" files=() d f sid
+  [ -d "$EVIDENCE" ] || { printf '%s' '[]'; return; }
+  while IFS= read -r sid; do
+    [ -n "$sid" ] || continue
+    d="$EVIDENCE/$sid"
+    [ -d "$d" ] || continue
+    for f in "$d"/*.json; do
+      [ -e "$f" ] || continue
+      if jq -e . "$f" >/dev/null 2>&1; then files+=("$f")
+      else echo "ledger: skipping unparseable evidence $f" >&2; fi
+    done
+  done <<CLAIMS
+$sids
+CLAIMS
+  [ ${#files[@]} -gt 0 ] || { printf '%s' '[]'; return; }
+  jq -s -c '[ .[] | .session_id as $s | (.tasks // [])[]
+              | select(.id != null)
+              | { id: .id, session_id: $s } ] | unique' "${files[@]}"
+}
+
 cmd_append() {
   local meter cost sid ev row commits repo t0 t1
   meter="$(cat)"
@@ -249,10 +281,17 @@ cmd_list() {
 }
 
 cmd_trend() {
-  local focus="${1:-}"
+  local focus="${1:-}" sids claims
   [ -f "$LEDGER" ] || { echo '{"sessions":0,"note":"no ledger yet"}'; return; }
 
-  jq -s --arg focus "$focus" '
+  # Read with -R for the same reason append does: one unparseable line must not
+  # decide what the rest of the ledger says.
+  sids="$(jq -R -r '(try (fromjson) catch null)
+                    | if type == "object" then (.session_id // empty) else empty end' \
+          "$LEDGER" 2>/dev/null || true)"
+  claims="$(dropbox_claims "$sids")"
+
+  jq -s --arg focus "$focus" --argjson claims "$claims" '
     def pct($p): if length == 0 then null
                  else sort | .[ (((length - 1) * $p) | floor) ] end;
     def r2: if . == null then null else (.*100|round)/100 end;
@@ -364,6 +403,32 @@ cmd_trend() {
                            and (.evidence.completed - .evidence.unverified) > 0)))
         as $grounded
 
+    # Cross-WORKSPACE task claims. window_overlap above is scoped per cwd, on
+    # the correct grounds that two sessions in different workspaces read
+    # different bead databases and cannot be claiming the same task. One gap
+    # that leaves: a task id is not globally unique -- "#123" is unique per
+    # repo, not per planet -- and the drop-box is keyed on session id ALONE,
+    # deliberately, so a directory rename or a worktree session still finds its
+    # own evidence. Evidence from two workspaces therefore does land in one
+    # directory, and when the ids collide both rows count the task in per_task
+    # with nothing excluding or flagging it. contracts.md section 2 warns about
+    # the namespacing hazard; until now only verify.sh asserted the invariant,
+    # as a test fixture, never at wrap-up time where a user would see it.
+    #
+    # DISCLOSED, not excluded. Excluding would move the baseline on a signal
+    # nobody has yet observed in the wild, and surface-do-not-fold is the rule
+    # the rest of this file keeps. Exclusion is the follow-up if it turns out
+    # to be common.
+    | ($all | map({ (.session_id): .cwd }) | add // {}) as $cwd_of
+    | ( $claims
+        | map(select($cwd_of[.session_id] != null)
+              | . + { cwd: $cwd_of[.session_id] })
+        | group_by(.id)
+        | map(select((map(.cwd) | unique | length) > 1))
+        | map({ task: .[0].id,
+                workspaces: (map(.cwd) | unique),
+                sessions:   (map(.session_id) | unique) }) ) as $xws
+
     | { sessions: ($all | length),
         with_evidence: ($withev | length),
 
@@ -416,6 +481,12 @@ cmd_trend() {
                  # the id list alone.
                  basis: .window_overlap_basis } ]),
 
+        # The axis window_overlaps cannot reach, reported in the same shape and
+        # for the same reason: a reader who is told rows were excluded needs to
+        # know which ones were NOT, and why. Empty on a healthy ledger, which
+        # is the normal answer and worth being able to see.
+        cross_workspace_claims: $xws,
+
         # The migration signal. Span-based overlap needs the row to CARRY
         # spans, and spans are written at append time, so upgrading changes
         # nothing at all until the rows are re-metered and re-appended. With
@@ -464,6 +535,11 @@ cmd_trend() {
              # asks why the count is what it is.
              + (if $ovl > 0 and $nospan > 0
                 then " — \($nospan) of these rows record no activity spans, so some overlap exclusions rest on the wider window test and may lift on a re-meter (see overlap_regimes)"
+                else "" end)
+             # And the exclusions above are per WORKSPACE. A task id claimed
+             # across two of them is counted twice and excluded by neither.
+             + (if ($xws | length) > 0
+                then " — \($xws | length) task id(s) are claimed by sessions in DIFFERENT workspaces (see cross_workspace_claims), so those rows may each be counting the other work. Task ids are not globally unique; these rows are disclosed, not excluded"
                 else "" end)),
 
         pricing_sources: ($all | map(.cost.pricing_source) | unique),
