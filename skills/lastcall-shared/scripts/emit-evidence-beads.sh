@@ -227,6 +227,16 @@ out="$(printf '%s' "$issues" | jq -c \
                key: (if (.msg | contains($i.id)) then "id" else "tracker" end) }
          ]) as $exact
       # An open bead has no closed_at, so its range ends at the session end.
+      # That is WIDER than it looks -- any commit between the bead starting and
+      # the session ending matches, including commits about something else --
+      # and ending it at the bead own updated_at was measured as the
+      # alternative on 2026-08-25. It took window-key artifacts from 7 to 0
+      # across 26 local sessions, because the range START is already
+      # started_at // updated_at and bd omits started_at from most rows, so
+      # both ends collapse to one instant. That trades an over-claim for a
+      # silent under-claim, which the tiering rule refuses. The disclosure
+      # carries the weight instead: this tier is labelled window, and an exact
+      # match always wins. See contracts.md section 2.
       | ((if $i.status == "closed" then $i.closed_at else $ended end) | ts) as $b1
       | ([ $commits[]
            | select($b0 != null and $b1 != null and .at >= $b0 and .at <= $b1)

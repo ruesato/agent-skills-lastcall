@@ -754,6 +754,25 @@ discovers the session commits itself, and writes one file per run:
   intersection, which beats a branch-name match, which beats a window. A
   producer whose source maintains the link itself should never fall back to a
   window key — it would import a weakness it does not have.
+- **Decision (2026-08-25): an OPEN bead keeps a window-key range that ends at
+  the session end, not at its own `updated_at`.** The range is wider than it
+  looks — any commit between the bead starting and the session ending matches,
+  including commits about something else — so narrowing it to the bead own
+  `updated_at` was proposed and then measured rather than assumed. Across 26
+  local sessions and 107 tasks the narrower range took window-key artifacts
+  from **7 to 0** and grounded partial tasks from **2 of 3 to 1 of 3**; closed
+  beads were unaffected either way (94 grounded completions in both), since
+  they key on `closed_at`. The collapse is structural, not a sampling artifact:
+  the range start is already `started_at // updated_at`, and `bd` omits
+  `started_at` from most rows, so for those beads both ends become the same
+  instant and no commit can fall between them. Narrowing therefore converts an
+  over-claim into a silent under-claim, which the tiering rule above already
+  refuses to do — that is why a window-only match is recorded rather than
+  dropped. The disclosure carries the weight instead: the tier is labelled
+  `window` in `artifact_matches`, and an exact `id` or `tracker` match always
+  takes precedence, so a task with an earned commit is never diluted by
+  everything committed beside it. Revisit if `bd` starts recording
+  `started_at` reliably, which removes the collapse.
 - **Hazard, recorded rather than fixed: two producers describing one piece of
   work in different id spaces double-count.** A user tracking the same task in
   both beads and GitHub Issues emits two different `task.id` values, and the
