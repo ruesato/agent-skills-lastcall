@@ -99,8 +99,23 @@ for f in "${FILES[@]}"; do
     # A memory the index does not point at is never loaded, so writing it
     # accomplished nothing. Matched on the basename inside a markdown link
     # target, which is the shape the index line uses.
+    #
+    # The link target may carry a PATH. A fixed-string search for "(foo.md)"
+    # cannot match "(sub/foo.md)", so an indexed memory in a subdirectory was
+    # reported as not indexed — a false "your memory did not land" from the one
+    # check whose entire job is catching silent memory failures. Latent while
+    # the store is flat, wrong the moment anyone nests, and the failure trains
+    # the reader to distrust every other problem this script reports.
+    #
+    # The prefix must end in "/" or be empty, so "foo.md" does not match a link
+    # to "barfoo.md". Same reasoning as the separator test in openloops.sh: the
+    # separator is part of the test, not something trimmed off it.
     base="$(basename "$f")"
-    if [ -f "$INDEX" ] && grep -qF "($base)" "$INDEX" 2>/dev/null; then
+    # Escaped for ERE. A memory filename is a slug plus .md today, but an
+    # unescaped "." matches any character and a "+" would rewrite the atom
+    # before it. A basename cannot contain "/", so that is not in the set.
+    esc="$(printf '%s' "$base" | sed 's#[][(){}.*+?^$|\]#\\&#g')"
+    if [ -f "$INDEX" ] && grep -qE "\(([^)]*/)?$esc\)" "$INDEX" 2>/dev/null; then
       indexed=true
     else
       add_problem "no index line in $INDEX links to $base"

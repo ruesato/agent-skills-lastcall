@@ -235,6 +235,24 @@ done
 # Claiming nothing is a legitimate outcome and must not read as a failure.
 if [ "$("$S/memory-check.sh" | jq -r '.ok, .claimed' | tr '\n' ' ')" = "true 0 " ]; then ok
 else bad "memory-check: no-files case is not a clean pass"; fi
+# A link target may carry a PATH. The index match was a fixed-string search for
+# "(base)", which cannot match "(sub/base)", so an indexed memory in a
+# subdirectory was reported as NOT indexed. That is a false "your memory did
+# not land" from the one check whose whole job is catching silent memory
+# failures, and a check that cries wolf gets ignored when it is right.
+mkdir -p "$mem/sub"
+printf -- '- [Nested](sub/nested.md) — hook\n' >> "$mem/MEMORY.md"
+printf -- '---\nname: nested\ndescription: d\nmetadata:\n  type: project\n---\n\nBody.\n' > "$mem/sub/nested.md"
+if [ "$("$S/memory-check.sh" --store "$mem" "$mem/sub/nested.md" | jq -r '.ok')" = "true" ]; then ok
+else bad "memory-check: an indexed memory in a subdirectory reported as unindexed"; fi
+# But the path prefix must end in a separator, or "foo.md" would be satisfied
+# by a link to "barfoo.md" — the same separator rule openloops.sh applies to
+# dirty paths, for the same reason. Widening the match must not blunt it.
+printf -- '- [Barfoo](barfoo.md) — hook\n' >> "$mem/MEMORY.md"
+printf -- '---\nname: barfoo\ndescription: d\nmetadata:\n  type: project\n---\n\nBody.\n' > "$mem/barfoo.md"
+printf -- '---\nname: foo\ndescription: d\nmetadata:\n  type: project\n---\n\nBody.\n' > "$mem/foo.md"
+if [ "$("$S/memory-check.sh" --store "$mem" "$mem/foo.md" | jq -r '.ok')" = "false" ]; then ok
+else bad "memory-check: foo.md counted as indexed because barfoo.md is linked"; fi
 rm -rf "$mem"
 say "  invariants checked"
 
