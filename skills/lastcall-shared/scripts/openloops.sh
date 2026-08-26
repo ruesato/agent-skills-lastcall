@@ -41,13 +41,54 @@ else
 
   # TODO markers introduced in work that is not yet committed. A marker already
   # committed is a backlog item, not an open loop from this session.
-  # The `|| true` matters: grep exits 1 when it finds nothing, and under
-  # pipefail a clean tree with no TODOs would kill the whole script.
-  TODOS="$( { { git diff -U0 2>/dev/null; git diff --cached -U0 2>/dev/null; } \
-    | grep -E '^\+' | grep -vE '^\+\+\+' \
-    | grep -oiE '(TODO|FIXME|XXX|HACK)[: ].*' \
-    | head -40 || true; } \
-    | jq -Rs 'split("\n") | map(select(length > 0)) | map({marker: .})' )"
+  #
+  # TWO sources, because a diff is not the whole of "not yet committed". The
+  # diffs carry markers added to files git already tracks. An UNTRACKED file
+  # appears in neither `git diff` nor `git diff --cached`, so a session that
+  # created a new file full of TODOs reported none of them — on the highest
+  # value output lastcall produces, with nothing saying the scan was partial.
+  # `git status --porcelain` did list the file, which is why it still showed up
+  # under `uncommitted`; the marker text inside it was what went missing.
+  #
+  # The `|| true` matters throughout: grep exits 1 when it finds nothing, and
+  # under pipefail a clean tree with no TODOs would kill the whole script.
+  todo_re='(TODO|FIXME|XXX|HACK)[: ]'
+  # A literal newline cannot be written inside the command substitution below —
+  # the substitution is re-parsed and the line ends early — so it is bound here.
+  NL=$'\n'
+
+  # Tracked files. git writes a `+++ b/<path>` header before each file section,
+  # so the path comes out of the same stream and costs no extra pass. Matching
+  # on the uppercased line and then cutting the ORIGINAL from RSTART keeps both
+  # the case-insensitivity and the leading-code trim that `grep -oiE` gave.
+  todo_tracked="$( { git diff -U0 2>/dev/null; git diff --cached -U0 2>/dev/null; } \
+    | awk -v re="$todo_re" '
+        /^\+\+\+ / { f = substr($0, 5); sub(/^b\//, "", f); next }
+        /^\+/       { l = substr($0, 2)
+                      if (match(toupper(l), re)) print f "\t" substr(l, RSTART) }
+      ' 2>/dev/null || true )"
+
+  # Untracked files, listed from the repo ROOT so their paths are root-relative
+  # like the diff headers and like `git status --porcelain` above — the same
+  # concept must not arrive in two path shapes. --exclude-standard applies
+  # .gitignore, which is what keeps build and vendor trees out of this. -I skips
+  # binaries; a marker-shaped byte sequence in a blob is not an open loop.
+  todo_untracked="$( git -C "$GROOT" ls-files --others --exclude-standard -z 2>/dev/null \
+    | while IFS= read -r -d "" f; do
+        # A newline in a filename would split one record into two below.
+        # Not a `case`: bash 3.2 mis-parses one inside a command substitution.
+        [ "${f#*"$NL"}" = "$f" ] || continue
+        [ -f "$GROOT/$f" ] || continue
+        grep -I -oiE "$todo_re.*" "$GROOT/$f" 2>/dev/null \
+          | awk -v f="$f" '{ print f "\t" $0 }' || true
+      done )"
+
+  TODOS="$( { printf '%s\n%s\n' "$todo_tracked" "$todo_untracked" \
+      | grep -v '^$' | head -40 || true; } \
+    | jq -Rs 'split("\n") | map(select(length > 0))
+              | map( (index("\t")) as $i
+                     | { file:   (if $i == null then null else .[0:$i]   end),
+                         marker: (if $i == null then .    else .[$i+1:] end) } )' )"
 fi
 
 jq -n --argjson m "$METER" --argjson git "$GIT" --argjson dirty "$DIRTY" \

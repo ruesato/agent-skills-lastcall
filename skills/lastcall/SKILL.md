@@ -376,6 +376,14 @@ describing one task yield one task, with their artifacts pooled and the highest
 `todos_added`, and `evidence_open`. Its `git.dirty` also decides whether the
 commit delegation is offered at all in step 5.
 
+Each entry in `todos_added` carries the `file` it landed in, repo-root-relative
+like every other path in that output, so a marker can be reported somewhere the
+reader can act on. The scan covers markers added to tracked files *and* markers
+in files git does not track yet: an untracked file is in neither `git diff` nor
+`git diff --cached`, so before 2026-08-25 a session that created a new file full
+of TODOs reported none of them. `.gitignore` still applies and binaries are
+skipped, so build and vendor trees stay out of it.
+
 ### When file counts are unavailable
 
 `work.files` sees `Edit`, `Write`, and `NotebookEdit` and nothing else, so a

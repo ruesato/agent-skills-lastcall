@@ -1567,6 +1567,70 @@ if grep -q 'tmp="$dir/.ledger.\$\$.jsonl"' "$S/ledger.sh" \
 then ok; else bad "ledger append temp is not written beside the ledger"; fi
 rm -f "$CORRUPT"
 
+# 10. TODO markers in UNTRACKED files. The scan read `git diff` plus `git diff
+# --cached`, and a brand-new file is in neither, so a session that created one
+# full of TODOs reported none of them. The file itself still showed under
+# `uncommitted`, which is what made the hole look like it was not there. New
+# files are ordinary session output and todos_added is the headline open-loop
+# signal, so this was a silent miss on the most-read line of the summary.
+#
+# The fixture is a real throwaway repo rather than a stub meter, because the
+# whole defect lives in which git command sees which file.
+OLR="$(mktemp -d "$TMP/lastcall-openloops.XXXXXX")"
+( cd "$OLR" && git init -q . \
+    && git config user.email t@example.invalid && git config user.name t \
+    && printf 'x\n' > tracked.txt && git add tracked.txt \
+    && git commit -q -m init ) >/dev/null 2>&1
+printf 'x\n  // TODO: marker in a tracked file\n'   > "$OLR/tracked.txt"
+mkdir -p "$OLR/sub"
+printf 'code\n// FIXME: marker in an untracked file\n' > "$OLR/sub/brand-new.js"
+printf 'noise\n# XXX: marker in an ignored file\n'  > "$OLR/skip.log"
+printf 'skip.log\n' > "$OLR/.gitignore"
+( cd "$OLR" && git add .gitignore && git commit -q -m ign ) >/dev/null 2>&1
+olo="$(printf '{"session":{"cwd":"%s"}}' "$OLR" | "$S/openloops.sh" 2>/dev/null)"
+if printf '%s' "$olo" | jq -e '[.todos_added[]
+      | select(.file == "sub/brand-new.js" and (.marker | startswith("FIXME:")))] | length == 1' >/dev/null 2>&1
+then ok; else bad "openloops missed a TODO in an untracked file"; fi
+# The tracked path must keep working — this changed how it is parsed, not just
+# what it covers.
+if printf '%s' "$olo" | jq -e '[.todos_added[]
+      | select(.file == "tracked.txt" and (.marker | startswith("TODO:")))] | length == 1' >/dev/null 2>&1
+then ok; else bad "openloops lost TODOs in tracked files"; fi
+# .gitignore is what keeps build and vendor trees out of the untracked scan. If
+# it stopped applying, the scan would drown the summary rather than sharpen it.
+if printf '%s' "$olo" | jq -e '[.todos_added[] | select(.marker | test("ignored"))] | length == 0' >/dev/null 2>&1
+then ok; else bad "openloops scanned a gitignored file for TODOs"; fi
+# Every marker names its file, root-relative, in BOTH paths — the diff header
+# and git ls-files disagree about the base by default, and uncommitted_files
+# already established that one concept must not arrive in two path shapes.
+if printf '%s' "$olo" | jq -e '(.todos_added | length) == 2
+      and ([.todos_added[] | select(.file == null)] | length) == 0
+      and ([.todos_added[] | select(.file | startswith("/"))] | length) == 0
+      and ([.todos_added[] | select(.file == "sub/brand-new.js")] | length) == 1' >/dev/null 2>&1
+then ok; else bad "todos_added lost its file attribution or its path shape"; fi
+# Run again with the session cwd inside a SUBDIRECTORY. git prints ls-files
+# paths relative to the invocation cwd but diff headers relative to the repo
+# root, so this is where the two shapes come apart if the root is not pinned.
+olsub="$(printf '{"session":{"cwd":"%s/sub"}}' "$OLR" | "$S/openloops.sh" 2>/dev/null)"
+if printf '%s' "$olsub" | jq -e '[.todos_added[] | select(.file == "sub/brand-new.js")] | length == 1' >/dev/null 2>&1
+then ok; else bad "openloops reported a TODO path relative to the session cwd, not the repo root"; fi
+# A binary file is not an open loop, however marker-shaped its bytes are.
+head -c 4096 /dev/urandom > "$OLR/blob.bin" 2>/dev/null || printf 'TODO: x\0\0\0' > "$OLR/blob.bin"
+printf 'TODO: buried in a binary\0\0\0' >> "$OLR/blob.bin"
+olb="$(printf '{"session":{"cwd":"%s"}}' "$OLR" | "$S/openloops.sh" 2>/dev/null)"
+if printf '%s' "$olb" | jq -e '[.todos_added[] | select(.marker | test("buried"))] | length == 0' >/dev/null 2>&1
+then ok; else bad "openloops scanned a binary file for TODOs"; fi
+# And a clean tree still reports an empty list rather than erroring out — the
+# `|| true` chain is load-bearing under pipefail and there are more of them now.
+OLC="$(mktemp -d "$TMP/lastcall-openloops-clean.XXXXXX")"
+( cd "$OLC" && git init -q . \
+    && git config user.email t@example.invalid && git config user.name t \
+    && printf 'x\n' > f.txt && git add f.txt && git commit -q -m init ) >/dev/null 2>&1
+if printf '{"session":{"cwd":"%s"}}' "$OLC" | "$S/openloops.sh" 2>/dev/null \
+     | jq -e '.todos_added == [] and .git.available == true' >/dev/null 2>&1
+then ok; else bad "openloops errored or misreported on a clean tree"; fi
+rm -rf "$OLR" "$OLC"
+
 say "  fixtures checked"
 
 # ---------------------------------------------------------------- result
