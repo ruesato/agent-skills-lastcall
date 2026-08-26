@@ -220,6 +220,38 @@ jq -s --slurpfile r "$RATES" --argjson drift "$DRIFT_PCT" '
           | if $c == null or ($c.unmatched // 0) == 0 then []
             else ["\($c.unmatched) of \($c.results) tool results could not be matched to the call that produced them, so tool_context covers only part of this session"]
             end )
+      # Token spend is DATED -- invariant 7 says a rate that was promotional
+      # when the tokens were burned still applies. But the meter groups token
+      # rows on (model, lane, speed, service_tier) and TIME is not in that key,
+      # so there is exactly one timestamp available for the whole session and
+      # it is session.ended. A session that starts inside a promo and ends
+      # after it lapses therefore prices every token at list rate, including
+      # the ones burned while the promo was in force, and the figure is an
+      # OVERSTATEMENT. rates.json expresses only an expiry, so that is the one
+      # direction there is to test.
+      #
+      # Flagged, not fixed. Pricing each row at the rate in force when it was
+      # burned needs a per-row time bucket out of the meter, which is a meter
+      # version bump and a change to invariant 7 -- a deliberate decision, not
+      # a drive-by. Meanwhile the figure goes into the ledger baseline, and an
+      # unflagged misprice contaminates every later comparison, which is the
+      # failure pricing_source and pricing_regimes exist to prevent.
+      #
+      # Silent when either timestamp is unreadable, rather than guessing at a
+      # boundary it cannot see. Long sessions are where this bites, and a long
+      # window is already a known hazard for the ledger.
+      + ( ($m.session.started // null) as $s0
+          | ($m.session.ended // null) as $s1
+          | if $s0 == null or $s1 == null then []
+            else ( [ $m.tokens[] | .model ]
+                   + [ (($m.work.skills // [])[]) | .model ] | unique )
+                 | map( . as $model
+                        | ($rates.models[$model|norm]) as $rate
+                        | select($rate != null and $rate.promo != null)
+                        | ($rate.promo.until + "T23:59:59Z") as $lapse
+                        | select($s0 <= $lapse and $s1 > $lapse)
+                        | "\($model): the promotional rate lapsed on \($rate.promo.until) and this session ran \($s0) to \($s1), crossing it. Every row prices at session end, so tokens burned before the lapse are charged at list rate here and this total OVERSTATES them" )
+            end )
       # Divergence names both numbers and points at the rate table. It never
       # says which one is right, because this cannot know.
       + ( if ($xcheck.diverged // false) then

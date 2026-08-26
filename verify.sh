@@ -301,6 +301,63 @@ if printf '%s' "$tc" | jq -e '.server_tools.web_search_requests == 3
       and ([.caveats[] | select(test("web search"))] | length == 1)' >/dev/null 2>&1
 then ok; else bad "cost did not surface unpriced web search requests"; fi
 
+# 1c. A session that STRADDLES a promo expiry. Token spend is dated, but the
+# meter groups token rows on (model, lane, speed, service_tier) and time is not
+# in that key, so cost.sh has one timestamp for the whole session and it is
+# session.ended. A session that starts inside a promo and ends after it lapses
+# prices every token at list rate, including the ones burned while the promo
+# was in force — silently, and the figure then goes into the ledger baseline
+# where it contaminates every later comparison.
+#
+# The promo dates come from rates.json rather than being hardcoded here, so
+# this fixture keeps working when the table is refreshed.
+promo_model="$(jq -r '.models | to_entries | map(select(.value.promo != null))
+                      | .[0].key // empty' "$S/rates.json")"
+if [ -z "$promo_model" ]; then
+  # No promotional rate in the table at all: nothing to straddle, and a
+  # fixture asserting otherwise would be asserting the table, not the code.
+  say "  (no promo in rates.json — promo-boundary fixture skipped)"
+else
+  promo_until="$(jq -r --arg m "$promo_model" '.models[$m].promo.until' "$S/rates.json")"
+  promo_meter() { jq -cn --arg m "$promo_model" --arg s0 "$1" --arg s1 "$2" \
+    '{session:{id:"fixture-promo-boundary", cwd:"/", branch:"main",
+               started:$s0, ended:$s1, wall_s:1, active_s:1,
+               agent_s:0, agent_turns:0},
+      tokens:[{model:$m, lane:"main", speed:"standard", service_tier:"standard",
+               turns:1, input:1000, output:1000, cache_read:0,
+               cache_w_5m:0, cache_w_1h:0, thinking:0}],
+      agents:[], work:{tools:{}, files:{}, skills:[]},
+      friction:{tool_errors:0, interrupts:0, denials:0}, evidence:[]}'; }
+  # Crossing it: flagged, and flagged as an OVERSTATEMENT — the direction
+  # matters, because a reader who cannot tell which way it is wrong cannot use
+  # the number at all.
+  pc="$(promo_meter "${promo_until}T12:00:00Z" "$(jq -rn --arg u "$promo_until" \
+        '($u + "T00:00:00Z" | fromdateiso8601) + 172800 | todateiso8601')" \
+        | "$S/cost.sh" 2>/dev/null)"
+  if printf '%s' "$pc" | jq -e '[.caveats[] | select(test("promotional rate lapsed"))] | length == 1' >/dev/null 2>&1
+  then ok; else bad "cost did not flag a session straddling a promo expiry"; fi
+  if printf '%s' "$pc" | jq -e '([.caveats[] | select(test("OVERSTATES"))] | length) == 1
+        and .promo_applied == false' >/dev/null 2>&1
+  then ok; else bad "the promo-boundary caveat did not name the direction of the error"; fi
+  # Wholly inside the promo: priced at the promo rate, and silent. A caveat on
+  # every promotional session would be noise that buries the one that matters.
+  pin="$(promo_meter "$(jq -rn --arg u "$promo_until" \
+         '($u + "T00:00:00Z" | fromdateiso8601) - 172800 | todateiso8601')" \
+         "${promo_until}T09:00:00Z" | "$S/cost.sh" 2>/dev/null)"
+  if printf '%s' "$pin" | jq -e '.promo_applied == true
+        and ([.caveats[] | select(test("promotional rate lapsed"))] | length == 0)' >/dev/null 2>&1
+  then ok; else bad "cost flagged a boundary on a session wholly inside the promo"; fi
+  # Wholly after it: list rate, and silent for the same reason.
+  pout="$(promo_meter "$(jq -rn --arg u "$promo_until" \
+          '($u + "T00:00:00Z" | fromdateiso8601) + 172800 | todateiso8601')" \
+          "$(jq -rn --arg u "$promo_until" \
+          '($u + "T00:00:00Z" | fromdateiso8601) + 259200 | todateiso8601')" \
+          | "$S/cost.sh" 2>/dev/null)"
+  if printf '%s' "$pout" | jq -e '.promo_applied == false
+        and ([.caveats[] | select(test("promotional rate lapsed"))] | length == 0)' >/dev/null 2>&1
+  then ok; else bad "cost flagged a boundary on a session wholly after the promo"; fi
+fi
+
 # 2. A session keeps writing to the project directory it started in, so
 # renaming the working directory strands the transcript under the old slug.
 # Resolution by id has to reach across project directories to find it.

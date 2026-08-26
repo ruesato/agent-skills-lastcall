@@ -391,6 +391,29 @@ Each of these silently corrupts totals if a reimplementation drops it:
    or priority-tier session at standard rates and leaves no trace that it
    happened — the same silent-miscomparison failure `pricing_source` exists to
    prevent.
+
+   **TIME is the one pricing dimension that is *not* in the key, and that gap
+   is disclosed rather than hidden.** Token spend is dated: a rate that was
+   promotional when the tokens were burned still applies after the promo
+   lapses. But the group key is `(model, lane, speed, service_tier)` and no
+   per-row timestamp is emitted, so `cost.sh` has exactly one timestamp for the
+   whole session and uses `session.ended`. A session that starts inside a promo
+   and ends after it lapses therefore charges every token at list rate,
+   including the ones burned while the promo was in force, and the total
+   **overstates** them. Since 2026-08-25 `cost.sh` emits a caveat naming the
+   model, the lapse date, the session window, and the direction of the error
+   whenever `started` and `ended` straddle a `promo.until`; it is silent when
+   either timestamp is unreadable, and silent on sessions wholly inside or
+   wholly outside the promo, so the flag stays worth reading.
+
+   That is a disclosure, not a fix, and the distinction is deliberate. Pricing
+   each row at the rate in force when it was burned requires the meter to emit
+   a per-row time bucket, which moves numbers for straddling sessions and is
+   therefore a `METER_VERSION` bump and a change to this invariant — a decision
+   to take on its own, not a side effect of a caveat. `rates.json` expresses
+   only an expiry (`promo.until`) and no start date, so the lapse is the only
+   boundary there is to test; a promo that *begins* mid-session is currently
+   inexpressible and therefore unmeasured rather than wrong.
 8. **`thinking` is a subset of `output`, not a sixth bucket.** Adding it to a
    total double-counts. It exists so a jump in output tokens can be told apart
    from a jump in reasoning.
