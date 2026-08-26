@@ -1833,6 +1833,67 @@ if printf '%s' "$nrow" | jq -e '.evidence.unverified == 0
 then ok; else bad "the id guard changed the counts for tasks that do have ids"; fi
 rm -rf "$NID"
 
+# 13. Two per-invocation costs that were paid on every render / every close.
+# Neither was a correctness bug; both are the cost discipline detect.sh already
+# applies to its MCP probe, and the fixtures here exist to make sure the
+# cheapening did not change any ANSWER.
+#
+# 13a. capture-statusline runs on every assistant message, and the prune is a
+# filesystem sweep. It is now throttled on the mtime of a marker. What must not
+# change: the pass-through is byte-identical, the capture still lands, and a
+# sweep that does run still removes both kinds of stale file.
+SLD="$(mktemp -d "$TMP/lastcall-sl.XXXXXX")"
+sl_in='{"session_id":"cap-fixture","workspace":{"current_dir":"/x"}}'
+sl_out="$(printf '%s' "$sl_in" | LASTCALL_STATUSLINE_DIR="$SLD" "$S/capture-statusline.sh" 2>/dev/null)"
+if [ "$sl_out" = "$sl_in" ] && [ -s "$SLD/cap-fixture.json" ]
+then ok; else bad "capture-statusline stopped passing stdin through or stopped capturing"; fi
+# Within the window the sweep is skipped, so stale files survive. This is the
+# throttle actually throttling — without it the assertion below is vacuous.
+: > "$SLD/stale.json"; : > "$SLD/.capture.stranded"
+touch -t 202601010000 "$SLD/stale.json" "$SLD/.capture.stranded"
+printf '%s' "$sl_in" | LASTCALL_STATUSLINE_DIR="$SLD" "$S/capture-statusline.sh" >/dev/null 2>&1
+if [ -f "$SLD/stale.json" ] && [ -f "$SLD/.capture.stranded" ]
+then ok; else bad "capture-statusline pruned on a render inside the throttle window"; fi
+# Age the marker and the sweep runs, removing both kinds while keeping the
+# live capture and its own bookkeeping.
+touch -t 202601010000 "$SLD/.pruned"
+printf '%s' "$sl_in" | LASTCALL_STATUSLINE_DIR="$SLD" "$S/capture-statusline.sh" >/dev/null 2>&1
+if [ ! -f "$SLD/stale.json" ] && [ ! -f "$SLD/.capture.stranded" ] \
+     && [ -s "$SLD/cap-fixture.json" ] && [ -f "$SLD/.pruned" ]
+then ok; else bad "capture-statusline did not prune once the throttle window elapsed"; fi
+rm -rf "$SLD"
+
+# 13b. doctrine-check spawns `bd prime` on every close. It is now cached on a
+# FINGERPRINT (workspace, bd binary, .beads mtime) rather than aged out on a
+# clock, because a stale answer here would be a confident false "clear" from
+# the one check that exists to catch a silent memory failure.
+#
+# The assertion that matters is that caching changed no ANSWER: uncached, cold
+# and warm must be byte-identical. Skipped entirely without bd, since the
+# vector being cached is bd output.
+if command -v bd >/dev/null 2>&1; then
+  DCD="$(mktemp -d "$TMP/lastcall-doctrine.XXXXXX")"
+  dc_un="$(LASTCALL_DOCTRINE_CACHE=0 "$S/doctrine-check.sh" "$HERE" 2>/dev/null | jq -S -c .)"
+  dc_cold="$(LASTCALL_STATE_DIR="$DCD" "$S/doctrine-check.sh" "$HERE" 2>/dev/null | jq -S -c .)"
+  dc_warm="$(LASTCALL_STATE_DIR="$DCD" "$S/doctrine-check.sh" "$HERE" 2>/dev/null | jq -S -c .)"
+  if [ "$dc_un" = "$dc_cold" ] && [ "$dc_cold" = "$dc_warm" ]
+  then ok; else bad "doctrine-check answered differently cached than uncached"; fi
+  # A warm run must actually be served from the cache, or the check above is
+  # comparing two uncached runs and asserting nothing.
+  if [ "$(find "$DCD/doctrine" -type f 2>/dev/null | grep -c .)" = "1" ]
+  then ok; else bad "doctrine-check did not write exactly one cache entry"; fi
+  # And the fingerprint must move when the workspace does, or the cache could
+  # outlive the state it describes.
+  dc_key="$(find "$DCD/doctrine" -type f 2>/dev/null | head -1)"
+  LASTCALL_STATE_DIR="$DCD" "$S/doctrine-check.sh" "$TMP" >/dev/null 2>&1 || true
+  if [ "$(find "$DCD/doctrine" -type f 2>/dev/null | grep -c .)" = "2" ] \
+       && [ -f "$dc_key" ]
+  then ok; else bad "doctrine-check reused one cache entry across two workspaces"; fi
+  rm -rf "$DCD"
+else
+  say "  (bd not installed — doctrine cache fixture skipped)"
+fi
+
 say "  fixtures checked"
 
 # ---------------------------------------------------------------- result

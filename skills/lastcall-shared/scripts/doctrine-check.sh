@@ -69,8 +69,47 @@ done
 # The live vector: what a session in DIR actually gets told at startup. Run bd
 # from DIR, not the caller cwd — `bd prime` output is workspace-dependent, and
 # scanning DIR's files while priming somewhere else would mix two projects.
+#
+# CACHED, because this runs on every wrap-up and a process spawn on that path
+# is the cost discipline detect.sh already applies to its MCP probe. The cache
+# is keyed on a FINGERPRINT rather than aged out on a clock: a stale answer
+# here would be a confident false "clear" from the one check that exists to
+# catch a silent memory failure, which is worse than the spawn it saves.
+#
+# The fingerprint is what the output actually depends on — the workspace, the
+# bd binary (the doctrine rule is compiled into it, which is the whole reason
+# this vector has no file to correct), and the mtime of the beads directory,
+# which moves when the workspace state behind `bd prime` does. Any of the three
+# changing misses the cache and re-primes. LASTCALL_DOCTRINE_CACHE=0 disables
+# it outright.
+prime_output() {
+  local out cache key stamp bdbin
+  bdbin="$(command -v bd 2>/dev/null || true)"
+  if [ "${LASTCALL_DOCTRINE_CACHE:-1}" = "0" ] || [ -z "$bdbin" ]; then
+    (cd "$DIR" 2>/dev/null && bd prime 2>/dev/null) || true
+    return 0
+  fi
+  stamp="$DIR|$bdbin|$(stat -f '%m %z' "$bdbin" 2>/dev/null || stat -c '%Y %s' "$bdbin" 2>/dev/null || echo unknown)|$(stat -f %m "$DIR/.beads" 2>/dev/null || stat -c %Y "$DIR/.beads" 2>/dev/null || echo none)"
+  key="$(printf '%s' "$stamp" | (shasum -a 256 2>/dev/null || sha256sum 2>/dev/null) | cut -d" " -f1)"
+  # No usable digest tool: prime rather than cache under a guessable key.
+  if [ -z "$key" ]; then
+    (cd "$DIR" 2>/dev/null && bd prime 2>/dev/null) || true
+    return 0
+  fi
+  cache="${LASTCALL_STATE_DIR:-$HOME/.claude/lastcall}/doctrine/$key"
+  if [ -f "$cache" ]; then cat "$cache"; return 0; fi
+  out="$( (cd "$DIR" 2>/dev/null && bd prime 2>/dev/null) || true )"
+  # Written beside the destination and renamed, so a concurrent wrap-up never
+  # reads a half-written cache. A failed write costs a spawn next time, which
+  # is the pre-cache behaviour and therefore safe to swallow.
+  if mkdir -p "$(dirname "$cache")" 2>/dev/null; then
+    printf '%s\n' "$out" > "$cache.$$" 2>/dev/null \
+      && mv -f "$cache.$$" "$cache" 2>/dev/null || rm -f "$cache.$$" 2>/dev/null || true
+  fi
+  printf '%s\n' "$out"
+}
 if command -v bd >/dev/null 2>&1; then
-  add "$( (cd "$DIR" 2>/dev/null && bd prime 2>/dev/null) | scan 'bd prime (plugin hook)' - || true)"
+  add "$(prime_output | scan 'bd prime (plugin hook)' - || true)"
 fi
 
 jq -n --argjson f "$FINDINGS" --arg mem "$MEMORY_SYSTEM" '

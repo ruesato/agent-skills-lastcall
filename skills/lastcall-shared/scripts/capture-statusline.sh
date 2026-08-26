@@ -75,8 +75,23 @@ OUT=""
 # One file per session id accumulates forever otherwise. Also sweeps temps
 # stranded by a cancel that outran the trap. Pruned before the copy to stdout,
 # which can block on a slow next stage.
-find "$DIR" -maxdepth 1 -type f \
-  \( -name '*.json' -mtime "+$KEEP_DAYS" -o -name '.capture.*' -mmin +60 \) \
-  -delete 2>/dev/null || true
+#
+# THROTTLED, because this script runs on every assistant message and the prune
+# is a filesystem sweep. Nothing here needs to happen per render: the files it
+# removes are a day old at the youngest. The last-prune time is the mtime of a
+# marker, which needs no state file format and no clock the user has to trust.
+# Touched BEFORE the sweep, so a slow find cannot let a second render start a
+# second one. The marker is neither *.json nor .capture.*, so the sweep does
+# not delete its own bookkeeping.
+PRUNE_EVERY_S="${LASTCALL_STATUSLINE_PRUNE_S:-300}"
+MARK="$DIR/.pruned"
+now="$(date +%s 2>/dev/null || echo 0)"
+last="$(stat -f %m "$MARK" 2>/dev/null || stat -c %Y "$MARK" 2>/dev/null || echo 0)"
+if [ "${now:-0}" -gt 0 ] && [ $(( ${now:-0} - ${last:-0} )) -ge "$PRUNE_EVERY_S" ]; then
+  : > "$MARK" 2>/dev/null || true
+  find "$DIR" -maxdepth 1 -type f \
+    \( -name '*.json' -mtime "+$KEEP_DAYS" -o -name '.capture.*' -mmin +60 \) \
+    -delete 2>/dev/null || true
+fi
 
 emit
