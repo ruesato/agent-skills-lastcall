@@ -271,6 +271,21 @@ replaces the row keyed on `session_id` alone. What it needs:
   Producing into one drop-box and appending from another is the failure this
   recipe exists to fix, spelled differently.
 
+`append` will not damage a ledger it cannot fully parse. A line that is not
+valid JSON is reported on stderr and left exactly where it is; the only row
+removed is the one being replaced. If you see
+
+```
+ledger: 2 unparseable line(s) in ~/.claude/lastcall/ledger.jsonl left untouched — repair them by hand
+```
+
+the append still succeeded — fix or delete those lines yourself, because
+`ledger.sh trend` and `list` both parse the file end to end and will fail on
+them. Before 2026-08-25 this warning did not exist and the situation was much
+worse: a single unparseable line silently deleted every row below it on the
+next append, and running this repair recipe was the likeliest way to trigger
+it.
+
 The same recipe is also how you **apply a newer overlap test to old rows**.
 `ledger.sh trend` narrows the overlap test from the session window to actual
 activity spans, but `spans` are written onto the row at `append` time, so rows

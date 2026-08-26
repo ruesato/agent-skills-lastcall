@@ -1502,6 +1502,71 @@ then ok; else bad "ledger counts disagree with the meter on a merged drop-box"; 
 rm -f "$LEDGER.merge"
 rm -rf "$MROOT"
 
+# 9. A partially corrupt ledger. `append` used to filter the file with one
+# streaming `jq -c . "$LEDGER"`, which stops at the first unparseable line with
+# every row ABOVE it already written to the temp. The parse error went to
+# /dev/null and the exit was swallowed by `|| true`, so that truncated temp was
+# promoted over the real ledger: one corrupt byte silently deleted every row
+# below it, and the documented repair path was where a user would meet it.
+#
+# The suite had zero coverage for this — every ledger fixture above is a file
+# jq can parse end to end, which is exactly why it survived a green suite.
+#
+# Three properties, all of which the old code failed: rows below the bad line
+# survive, the bad line itself survives (append removes ONE row, the one it is
+# replacing, and dropping the damaged line would be the same destruction one
+# step smaller), and the damage is reported rather than passed off as success.
+CORRUPT="$LEDGER.corrupt"
+crow='{"session":{"id":"fixture-corrupt-ledger","cwd":"/","branch":"main",
+  "started":"2026-08-01T00:00:00Z","ended":"2026-08-01T00:00:01Z",
+  "wall_s":1,"active_s":1,"agent_s":0,"agent_turns":0},
+  "tokens":[{"model":"claude-opus-5","lane":"main","speed":"standard",
+    "service_tier":"standard","turns":1,"input":10,"output":10,
+    "cache_read":0,"cache_w_5m":0,"cache_w_1h":0,"thinking":0}],
+  "agents":[],"work":{"tools":{},"files":{}},
+  "friction":{"tool_errors":0,"interrupts":0,"denials":0},"evidence":[]}'
+printf '%s\n' '{"session_id":"above-1","cost":{"usd":1}}' \
+              '{"session_id":"above-2","cost":{"usd":2}}' \
+              'THIS IS NOT JSON' \
+              '{"session_id":"below-1","cost":{"usd":3}}' \
+              '{"session_id":"below-2","cost":{"usd":4}}' > "$CORRUPT"
+cerr="$(printf '%s' "$crow" | LASTCALL_LEDGER="$CORRUPT" \
+        LASTCALL_COMMIT_DISCOVERY=0 "$S/ledger.sh" append 2>&1 >/dev/null || true)"
+if [ "$(grep -c . "$CORRUPT")" = "6" ] \
+     && grep -q '"session_id":"below-1"' "$CORRUPT" \
+     && grep -q '"session_id":"below-2"' "$CORRUPT" \
+     && grep -q '^THIS IS NOT JSON$' "$CORRUPT" \
+     && grep -q '"fixture-corrupt-ledger"' "$CORRUPT"
+then ok; else bad "append truncated a ledger at its first unparseable line"; fi
+if printf '%s' "$cerr" | grep -q 'unparseable'
+then ok; else bad "append repaired over a corrupt ledger without saying so"; fi
+# Replacement still keys on session_id alone, corrupt neighbours or not: a
+# second append must swap the row, not stack a duplicate beside it.
+printf '%s' "$crow" | LASTCALL_LEDGER="$CORRUPT" LASTCALL_COMMIT_DISCOVERY=0 \
+  "$S/ledger.sh" append >/dev/null 2>&1 || true
+if [ "$(grep -c . "$CORRUPT")" = "6" ] \
+     && [ "$(grep -c '"fixture-corrupt-ledger"' "$CORRUPT")" = "1" ]
+then ok; else bad "append over a corrupt ledger stopped replacing in place"; fi
+# And a clean ledger stays silent — a warning on every wrap-up would be noise
+# that trains the reader to ignore the one that matters.
+rm -f "$LEDGER.quiet"
+qerr="$(printf '%s' "$crow" | LASTCALL_LEDGER="$LEDGER.quiet" \
+        LASTCALL_COMMIT_DISCOVERY=0 "$S/ledger.sh" append 2>&1 >/dev/null || true)"
+if [ -z "$qerr" ]; then ok; else bad "append warned about a ledger with nothing wrong with it: $qerr"; fi
+rm -f "$LEDGER.quiet"
+
+# 9b. The temp `append` promotes must live BESIDE the ledger, not in $TMPDIR.
+# `mv` is only atomic within one filesystem; across devices it is a copy, and a
+# crash mid-copy leaves the baseline truncated or empty. The comment on that
+# line used to assert atomicity the code did not provide. config.sh:254 and
+# capture-statusline.sh:70 already carry the correct idiom and the reasoning.
+# Asserted on the source, because provoking a cross-device rename portably
+# inside the suite is not possible.
+if grep -q 'tmp="$dir/.ledger.\$\$.jsonl"' "$S/ledger.sh" \
+     && ! grep -qE 'tmp="\$\(mktemp\)"' "$S/ledger.sh"
+then ok; else bad "ledger append temp is not written beside the ledger"; fi
+rm -f "$CORRUPT"
+
 say "  fixtures checked"
 
 # ---------------------------------------------------------------- result

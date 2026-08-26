@@ -200,14 +200,45 @@ cmd_append() {
       # null, not zeroes: "no evidence" and "zero tasks done" are different claims.
       evidence: $e }')
 
-  mkdir -p "$(dirname "$LEDGER")"
+  local dir; dir="$(dirname "$LEDGER")"
+  mkdir -p "$dir"
   touch "$LEDGER"
+
   # Replace this session's row in place rather than appending a duplicate.
   # Keyed on session_id alone — metered_at is freshness, not identity.
-  local tmp; tmp="$(mktemp)"
-  jq -c --arg sid "$sid" 'select(.session_id != $sid)' "$LEDGER" > "$tmp" 2>/dev/null || true
+  #
+  # Read with -R so jq takes each line as TEXT and decodes it itself. Letting jq
+  # parse the file directly aborts on the first unparseable line, having already
+  # written every row above it to the temp — and with the parse error discarded
+  # and the exit swallowed, that truncated temp was promoted over the ledger,
+  # silently deleting every row below the bad one. One corrupt byte cost the
+  # whole baseline below it, in the documented repair path.
+  #
+  # Same problem evidence_for handles one layer up, so it gets the same answer:
+  # an unparseable line is warned about, not aborted over. It is carried through
+  # verbatim rather than skipped, because dropping it would be exactly the
+  # destruction this guard exists to prevent — append removes one row, the row
+  # it is replacing, and nothing else.
+  local bad
+  bad="$(jq -R -r 'select(length > 0)
+                   | select((try (fromjson | "ok") catch "bad") == "bad")' \
+         "$LEDGER" 2>/dev/null | grep -c . || true)"
+  [ "${bad:-0}" -eq 0 ] || echo "ledger: $bad unparseable line(s) in $LEDGER left untouched — repair them by hand" >&2
+
+  # The temp lives beside the ledger, not in $TMPDIR, so the rename is
+  # same-filesystem and therefore atomic. A cross-device mv is a copy, and a
+  # torn ledger loses the whole baseline. config.sh:254 and
+  # capture-statusline.sh:70 do the same, for the same reason. $$ is enough of a
+  # uniqueness token because append is the only writer and runs serially.
+  local tmp; tmp="$dir/.ledger.$$.jsonl"
+  jq -R -r --arg sid "$sid" '
+    # No apostrophes in this program: it is single-quoted in sh.
+    . as $line
+    | (try (fromjson) catch null) as $o
+    | if ($o | type) == "object" and $o.session_id == $sid then empty else $line end
+  ' "$LEDGER" > "$tmp"
   printf '%s\n' "$row" >> "$tmp"
-  mv "$tmp" "$LEDGER"        # atomic; a torn ledger loses the whole baseline
+  mv -f "$tmp" "$LEDGER"
   printf '%s\n' "$row"
 }
 

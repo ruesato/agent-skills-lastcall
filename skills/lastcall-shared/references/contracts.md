@@ -971,6 +971,28 @@ build one from.
   `trend` excludes such rows from every per-task ratio. The producer runs
   *before* `append`, both reading the same `LASTCALL_EVIDENCE_DIR`; README
   "Repairing a ledger row" carries the recipe and `verify.sh` pins it.
+- **`append` removes exactly one row, and never more.** The row it replaces.
+  A line it cannot parse is reported on stderr and carried through untouched,
+  which is the same answer `evidence_for` gives an unparseable evidence file
+  one layer up. The old filter let jq parse the ledger directly, so an
+  unparseable line ended the stream with every row above it already in the
+  temp and every row below it unread; the parse error went to `/dev/null` and
+  the exit was swallowed, so the truncated temp was promoted as if nothing had
+  happened. One corrupt byte silently deleted the whole baseline below it, and
+  the documented repair path above is where a user would have met it. Reading
+  with `jq -R` so jq decodes each line itself is what makes a bad line a
+  *reportable* line rather than the end of the file. Dropping the damaged line
+  instead of carrying it would be the same destruction one step smaller, so it
+  stays. Pinned at `verify.sh` section 9 — the suite had no partially-corrupt
+  ledger fixture before 2026-08-25, which is precisely why a green suite never
+  saw this.
+- **The temp is written beside the ledger, never in `$TMPDIR`.** `mv` is only
+  atomic within one filesystem; across devices it is a copy, so a crash
+  mid-copy leaves the baseline truncated or empty. `config.sh` and
+  `capture-statusline.sh` already carry this rule with the same reasoning;
+  `ledger.sh` asserted atomicity in a comment while using bare `mktemp`, which
+  holds only where `$TMPDIR` and `$HOME` share a volume. It does not on a Linux
+  host with `/tmp` on tmpfs.
 - **`pricing_source` is required.** A cost figure whose rate table is unknown
   cannot be compared against other rows, and rates change over time.
 - **`promo_applied` records the pricing regime, and absent means unknown.** A
