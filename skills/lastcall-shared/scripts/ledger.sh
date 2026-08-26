@@ -56,6 +56,20 @@ evidence_for() {
   done
   [ ${#ok[@]} -gt 0 ] || { printf '%s' 'null'; return; }
 
+  # A task with no id cannot be merged, and jq will not say so: null is a valid
+  # group key, so group_by(.id) collapses EVERY id-less task into one and the
+  # count silently comes back short. contracts.md section 2 requires the field;
+  # nothing enforced it, so a producer that forgot undercounted invisibly.
+  # Skipped rather than counted, because an id-less task is also the one thing
+  # the cross-producer merge cannot dedupe -- keeping it risks the double-count
+  # the merge rule exists to remove. Warned about, because a silent undercount
+  # is the shape this whole layer is built to avoid. meter-session.sh carries
+  # the same guard and verify.sh pins the two readers against each other.
+  local noid
+  noid="$(jq -s '[ .[] | (.tasks // [])[] | select(.id == null) ] | length' \
+          "${ok[@]}" 2>/dev/null || true)"
+  [ "${noid:-0}" -eq 0 ] || echo "ledger: $noid evidence task(s) carry no id and are not counted — a producer must set task.id (contracts.md section 2)" >&2
+
   jq -s '
     # Merge on task.id ALONE. The SOURCE used to be part of the key, and that
     # double-counted every task two producers both described -- evidence from
@@ -72,6 +86,7 @@ evidence_for() {
     # meter-session.sh, which emits the tasks themselves, merges those too.
     # No apostrophes in this program: it is single-quoted in sh.
     ( map(. as $d | (.tasks // [])[] | {source: $d.source, emitted_at: $d.emitted_at} + .)
+      | map(select(.id != null))
       | group_by(.id)
       | map( sort_by([.emitted_at, .source]) as $g
              | ($g | last)

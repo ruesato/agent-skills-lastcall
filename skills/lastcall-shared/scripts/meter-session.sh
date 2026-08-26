@@ -177,8 +177,16 @@ if [ -d "$EVDIR" ]; then
       # every machine. artifact_matches is set only when some record carried it,
       # because absent there means unlabeled and [] would assert more than was
       # observed.
+      # An id-less task is dropped, not merged. null is a valid group key, so
+      # group_by(.id) would collapse every one of them into a single task and
+      # undercount without a word. ledger.sh carries the identical guard and
+      # verify.sh pins the two readers against each other.
+      noid="$(jq -s '[ .[] | (.tasks // [])[] | select(.id == null) ] | length' \
+              "${evok[@]}" 2>/dev/null || true)"
+      [ "${noid:-0}" -eq 0 ] || echo "meter: $noid evidence task(s) carry no id and are not counted — a producer must set task.id" >&2
       EV="$(jq -s -c '
         map(. as $d | (.tasks // [])[] | {source: $d.source, emitted_at: $d.emitted_at} + .)
+        | map(select(.id != null))
         | group_by(.id)
         | map( sort_by([.emitted_at, .source]) as $g
                | ($g | map(.artifact_matches // []) | add | unique) as $am

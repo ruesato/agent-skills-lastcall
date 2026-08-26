@@ -736,6 +736,18 @@ discovers the session commits itself, and writes one file per run:
   and the merge rule below then undercounts silently. The required form is
   `github:<host>/<owner>/<repo>#123` — host included, so a github.com issue and
   a GitHub Enterprise Server issue with the same number never merge.
+- **A task with no `id` is SKIPPED by both readers, and the skip is reported.**
+  `id` is required, and it used to be required by prose alone. `null` is a
+  valid group key in jq, so `group_by(.id)` collapsed every id-less task in a
+  drop-box into a single task and the count came back short with nothing said —
+  a producer that forgot the field undercounted invisibly, which is the failure
+  this whole layer is built to prevent. Since 2026-08-25 `meter-session.sh` and
+  `ledger.sh` both drop such tasks and warn on stderr with the count. Dropped
+  rather than counted, because an id-less task is also the one thing the
+  cross-producer merge cannot dedupe: keeping it risks exactly the double-count
+  the merge rule exists to remove. The two readers implement this rule
+  separately and `verify.sh` pins them against each other, because a guard that
+  holds in one and not the other is worse than none.
 - **`artifact_matches` keys are producer-defined; the TIERING is the reusable
   part.** The beads table (`id` / `tracker` / `window`) is specific to what bd
   records. What generalizes is the ordering: a *declared* link beats a commit

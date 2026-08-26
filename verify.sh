@@ -1355,7 +1355,15 @@ if command -v bd >/dev/null 2>&1; then
 crossrow_dupes() { # <evidence-dir> -> "<bead-id> <sid>,<sid>" per shared bead
   local dir="$1" files
   [ -d "$dir" ] || return 0
-  files="$(/usr/bin/find "$dir" -name '*.json' 2>/dev/null)"
+  # Resolved through PATH like every other script here. A hardcoded
+  # /usr/bin/find is absent on some hosts, and the guard below turns that into
+  # a check that PASSES having asserted nothing — the silent-success shape this
+  # whole suite exists to catch, in the suite itself.
+  # Plain assignment, so the exit status is the command substitution own: a
+  # missing or broken find exits non-zero with EMPTY output, which the
+  # no-files guard below would otherwise turn into a silent pass.
+  files="$(find "$dir" -name '*.json' 2>/dev/null)" \
+    || { bad "cross-row check could not run: find failed under $dir"; return 0; }
   [ -n "$files" ] || return 0
   # shellcheck disable=SC2086
   jq -s -r '
@@ -1779,6 +1787,51 @@ then ok; else bad "two id-less tasks were reported as one task claimed twice"; f
 if xws_trend "$XWS/absent" | jq -e '.cross_workspace_claims == [] and .sessions == 3' >/dev/null 2>&1
 then ok; else bad "trend failed when the evidence drop-box does not exist"; fi
 rm -rf "$XWS"
+
+# 12. A task with no id. jq treats null as a valid group key, so group_by(.id)
+# collapsed EVERY id-less task into a single task and the count came back short
+# with nothing said. contracts.md section 2 requires the field; nothing enforced
+# it, so a producer that forgot undercounted invisibly — the exact shape the
+# absence-is-visible discipline exists to prevent.
+#
+# Both readers are checked, because meter-session.sh and ledger.sh implement
+# the same merge rule separately and a guard that holds in one and not the
+# other is worse than none.
+NID="$(mktemp -d "$TMP/lastcall-nullid.XXXXXX")"
+mkdir -p "$NID/ev/n-one"
+jq -cn '{schema:"lastcall.evidence/1", source:"a", session_id:"n-one",
+         emitted_at:"2026-08-01T00:00:00Z",
+         tasks:[{id:"T-1",  title:"has an id", status:"completed", artifacts:["commit:abc"]},
+                {title:"no id at all",  status:"completed", artifacts:[]},
+                {title:"none here too", status:"completed", artifacts:[]}]}' \
+  > "$NID/ev/n-one/a.json"
+nid_meter='{"session":{"id":"n-one","cwd":"/","branch":"main",
+  "started":"2026-08-01T00:00:00Z","ended":"2026-08-01T01:00:00Z",
+  "wall_s":3600,"active_s":600,"agent_s":0,"agent_turns":0},
+  "tokens":[{"model":"claude-opus-5","lane":"main","speed":"standard",
+    "service_tier":"standard","turns":1,"input":100,"output":100,
+    "cache_read":0,"cache_w_5m":0,"cache_w_1h":0,"thinking":0}],
+  "agents":[],"work":{"tools":{},"files":{},"skills":[]},
+  "friction":{"tool_errors":0,"interrupts":0,"denials":0},"evidence":[]}'
+# Two id-less tasks must not become one. Dropping them is the honest answer:
+# an id-less task is also the one thing the cross-producer merge cannot dedupe,
+# so counting it risks the double-count the merge rule exists to remove.
+nrow="$(printf '%s' "$nid_meter" | LASTCALL_LEDGER="$NID/l.jsonl" \
+        LASTCALL_EVIDENCE_DIR="$NID/ev" LASTCALL_COMMIT_DISCOVERY=0 \
+        "$S/ledger.sh" append 2>/dev/null)"
+if printf '%s' "$nrow" | jq -e '.evidence.completed == 1' >/dev/null 2>&1
+then ok; else bad "ledger merged id-less evidence tasks instead of skipping them"; fi
+# Silence here would be the undercount all over again, one layer up.
+nerr="$(printf '%s' "$nid_meter" | LASTCALL_LEDGER="$NID/l.jsonl" \
+        LASTCALL_EVIDENCE_DIR="$NID/ev" LASTCALL_COMMIT_DISCOVERY=0 \
+        "$S/ledger.sh" append 2>&1 >/dev/null || true)"
+if printf '%s' "$nerr" | grep -q 'carry no id'
+then ok; else bad "ledger skipped id-less tasks without saying so"; fi
+# And a task that HAS an id is untouched by the guard.
+if printf '%s' "$nrow" | jq -e '.evidence.unverified == 0
+      and .evidence.sources == ["a"]' >/dev/null 2>&1
+then ok; else bad "the id guard changed the counts for tasks that do have ids"; fi
+rm -rf "$NID"
 
 say "  fixtures checked"
 
