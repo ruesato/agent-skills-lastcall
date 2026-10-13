@@ -193,6 +193,14 @@ jq -s --slurpfile r "$RATES" --argjson drift "$DRIFT_PCT" '
           | if . > 0 then
               ["\(.) web search calls carry per-request spend that no token bucket expresses — NOT in this total"]
             else [] end )
+      # Code execution bills by container-hour beyond a per-org free tier
+      # (1,550 hours per org per month, then $0.05 per hour, 5-minute
+      # minimum). The meter counts invocations, not hours, and no request
+      # count can express container-hour spend.
+      + ( ([ $m.tokens[] | .code_execution // 0 ] | add // 0)
+          | if . > 0 then
+              ["\(.) code execution calls may carry container-hour spend (free up to 1,550 hours per org per month, then $0.05 per hour, 5-minute minimum) that no token bucket and no request count can express — NOT in this total"]
+            else [] end )
       # The streaming dedup groups on the first of requestId / message.id
       # present, falling back to uuid, which is unique per entry. rid 0 with a
       # positive mid_coverage is the Bedrock envelope handled by the fallback:
@@ -324,7 +332,8 @@ jq -s --slurpfile r "$RATES" --argjson drift "$DRIFT_PCT" '
       # total does not price it — see caveats.
       server_tools: {
         web_search_requests: ([ $m.tokens[] | .web_search // 0 ] | add // 0),
-        web_fetch_requests:  ([ $m.tokens[] | .web_fetch  // 0 ] | add // 0)
+        web_fetch_requests:  ([ $m.tokens[] | .web_fetch  // 0 ] | add // 0),
+        code_execution_requests: ([ $m.tokens[] | .code_execution // 0 ] | add // 0)
       },
 
       caveats: $caveats,

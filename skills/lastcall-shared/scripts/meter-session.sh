@@ -590,10 +590,13 @@ meter_file() {
                    # Token-weight of re-reading this reasoning on every later
                    # turn. Priced downstream at the cache_read multiplier.
                    thinking_carry: (map(._carry) | add),
-                   # Server-side tools carry per-request spend, so these counts
-                   # are the only trace of it anywhere in the transcript.
+                   # Server-side tools carry spend the meter cannot price
+                   # directly — web_search and web_fetch per request, code
+                   # execution by container-hour beyond a per-org free tier.
+                   # These counts are the only record of any of it.
                    web_search: (map(.message.usage.server_tool_use.web_search_requests // 0) | add),
                    web_fetch:  (map(.message.usage.server_tool_use.web_fetch_requests  // 0) | add),
+                   code_execution: (map(.message.usage.server_tool_use.code_execution_requests // 0) | add),
                    efforts: (group_by(.effort) | map({ (.[0].effort // "unset"): length }) | add // {})
                  }) ),
         # Per-turn skill and plugin attribution, written by Claude Code itself.
