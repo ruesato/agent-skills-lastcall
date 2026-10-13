@@ -44,9 +44,29 @@ if jq -e '.verified_on and .source and .multipliers and .models' "$S/rates.json"
 then ok; else bad "rates.json missing required fields"; fi
 say "  $pass ok"
 
+# A session that ran a model with no rate (minimax, qwen, anything that is not
+# Claude) cannot be priced, and cost.sh refuses to guess — correctly, since a
+# guessed rate would poison the baseline. That refusal is the right answer for
+# the script and a false alarm for this sweep: it used to fail six checks per
+# such session, which buried the failures that mattered. So the sweep counts
+# these sessions as unpriceable and skips only what needs a price.
+#
+# The excuse is narrow. It prints the unknown model ids ONLY when every one of
+# them is non-Claude. A Claude model missing from rates.json means the table is
+# behind a release, which is exactly what cost.sh failing loudly exists to say,
+# so that session prints nothing here and still fails. The id normalization is
+# the one cost.sh applies; fixture 14 pins the two together.
+unpriceable_models() {
+  printf '%s' "$1" | jq -r --slurpfile r "$S/rates.json" '
+    [ .tokens[]? | .model // empty
+      | select($r[0].models[sub("-20[0-9]{6}$"; "")] == null) ] | unique as $unk
+    | if ($unk | length) > 0 and all($unk[]; startswith("claude-") | not)
+      then $unk | join(",") else empty end' 2>/dev/null
+}
+
 # ---------------------------------------------------------------- sweep
 say "== transcripts =="
-sessions=0; metered=0; withsub=0; stale_cwd=0; seen=""
+sessions=0; metered=0; withsub=0; stale_cwd=0; seen=""; unpriced=0; unpriced_models=""
 for f in "$PROJECTS"/*/*.jsonl; do
   [ -f "$f" ] || continue
   sid="$(basename "$f" .jsonl)"
@@ -88,37 +108,49 @@ for f in "$PROJECTS"/*/*.jsonl; do
      && printf '%s' "$out" | jq -e '.session.agent_s <= (.session.wall_s + 1)' >/dev/null 2>&1
   then ok; else bad "meter $sid: agent_s missing or exceeds wall_s"; fi
 
-  c="$(printf '%s' "$out" | "$S/cost.sh" 2>/dev/null)"
-  if printf '%s' "$c" | jq -e '.total_usd >= 0' >/dev/null 2>&1; then ok
-  else bad "cost $sid"; fi
-  # promo_applied must be a real boolean — it was absent once, and consumers
-  # reading a missing key silently dropped the promotional-pricing signal.
-  if printf '%s' "$c" | jq -e '.promo_applied | type == "boolean"' >/dev/null 2>&1; then ok
-  else bad "cost $sid: promo_applied is not a boolean"; fi
+  c="$(printf '%s' "$out" | "$S/cost.sh" 2>/dev/null)"; cost_rc=$?
+  # Excuse a failed cost.sh only when the failure is the excusable kind — see
+  # unpriceable_models. A cost.sh that SUCCEEDS is always checked in full, so a
+  # wrong classification can only ever skip checks that were already failing.
+  priceable=1
+  if [ "$cost_rc" -ne 0 ]; then
+    um="$(unpriceable_models "$out")"
+    if [ -n "$um" ]; then
+      priceable=0; unpriced=$((unpriced+1)); unpriced_models="$unpriced_models,$um"
+    fi
+  fi
+  if [ "$priceable" = 1 ]; then
+    if printf '%s' "$c" | jq -e '.total_usd >= 0' >/dev/null 2>&1; then ok
+    else bad "cost $sid"; fi
+    # promo_applied must be a real boolean — it was absent once, and consumers
+    # reading a missing key silently dropped the promotional-pricing signal.
+    if printf '%s' "$c" | jq -e '.promo_applied | type == "boolean"' >/dev/null 2>&1; then ok
+    else bad "cost $sid: promo_applied is not a boolean"; fi
 
-  # Skill attribution partitions the same spend, so the parts must sum to the
-  # whole. The null skill row is the unattributed remainder and carries the
-  # difference; dropping it is what would break this.
-  if printf '%s' "$c" | jq -e '(([.by_skill[].usd] | add // 0) - .total_usd | fabs) < 0.01' \
-       >/dev/null 2>&1; then ok
-  else bad "cost $sid: by_skill does not sum to total_usd"; fi
+    # Skill attribution partitions the same spend, so the parts must sum to the
+    # whole. The null skill row is the unattributed remainder and carries the
+    # difference; dropping it is what would break this.
+    if printf '%s' "$c" | jq -e '(([.by_skill[].usd] | add // 0) - .total_usd | fabs) < 0.01' \
+         >/dev/null 2>&1; then ok
+    else bad "cost $sid: by_skill does not sum to total_usd"; fi
 
-  # A re-establishment event is a cache WRITE, so it can never outnumber the
-  # turns that wrote cache, and its dollars are a slice of the total. Both
-  # bounds are structural: violating either means the event scan drifted off
-  # the turns it is supposed to be scanning.
-  if printf '%s' "$c" | jq -e 'if has("cache_reestablish") then
-         (.cache_reestablish | .events <= .writing_turns and .usd >= 0) else true end' \
-       >/dev/null 2>&1; then ok
-  else bad "cost $sid: cache_reestablish events exceed writing turns"; fi
+    # A re-establishment event is a cache WRITE, so it can never outnumber the
+    # turns that wrote cache, and its dollars are a slice of the total. Both
+    # bounds are structural: violating either means the event scan drifted off
+    # the turns it is supposed to be scanning.
+    if printf '%s' "$c" | jq -e 'if has("cache_reestablish") then
+           (.cache_reestablish | .events <= .writing_turns and .usd >= 0) else true end' \
+         >/dev/null 2>&1; then ok
+    else bad "cost $sid: cache_reestablish events exceed writing turns"; fi
 
-  # Thinking carry is re-reading output that was already billed once, so it is
-  # bounded by the total. A carry larger than the whole session means the carry
-  # weight is being multiplied by the wrong turn count.
-  if printf '%s' "$c" | jq -e 'if has("thinking_carry_usd") then
-         (.thinking_carry_usd >= 0 and .thinking_carry_usd <= .total_usd + 0.01) else true end' \
-       >/dev/null 2>&1; then ok
-  else bad "cost $sid: thinking_carry_usd out of bounds"; fi
+    # Thinking carry is re-reading output that was already billed once, so it is
+    # bounded by the total. A carry larger than the whole session means the carry
+    # weight is being multiplied by the wrong turn count.
+    if printf '%s' "$c" | jq -e 'if has("thinking_carry_usd") then
+           (.thinking_carry_usd >= 0 and .thinking_carry_usd <= .total_usd + 0.01) else true end' \
+         >/dev/null 2>&1; then ok
+    else bad "cost $sid: thinking_carry_usd out of bounds"; fi
+  fi
 
   # Every tool_result must be attributable to the call that produced it. This
   # caught a real defect: the id map was read off the DEDUPED turns, whose first
@@ -159,10 +191,23 @@ for f in "$PROJECTS"/*/*.jsonl; do
       ' >/dev/null 2>&1; then ok
   else bad "meter $sid: spans do not sum to active_s, or are not disjoint and ascending"; fi
 
-  if printf '%s' "$out" | "$S/ledger.sh" append >/dev/null 2>&1; then ok
-  else bad "ledger $sid"; fi
+  if [ "$priceable" = 1 ]; then
+    if printf '%s' "$out" | "$S/ledger.sh" append >/dev/null 2>&1; then ok
+    else bad "ledger $sid"; fi
+  fi
 done
 say "  $sessions sessions ($withsub with subagents, $stale_cwd with a stale recorded cwd)"
+# Printed even under -q, and with the model names. A skipped check that reports
+# nothing is the "corpus shrank and it still said PASS" failure this file
+# already guards against, so the skip is always visible and always attributed.
+if [ "$unpriced" -gt 0 ]; then
+  um_list="$(printf '%s' "$unpriced_models" | tr ',' '\n' | sed '/^$/d' | sort -u | paste -sd, -)"
+  echo "  $unpriced unpriceable (no rate for: $um_list) — cost and ledger checks skipped"
+fi
+# If every session were unpriceable, the cost checks would have asserted nothing
+# and the run would still pass. Require at least one session that was priced.
+if [ "$unpriced" -lt "$metered" ]; then ok
+else bad "all $metered metered sessions were unpriceable — the cost checks asserted nothing"; fi
 
 # Every distinct session id on disk must have produced valid meter output. This
 # is the check the rename evaded: the corpus shrank by a sixth and the run still
@@ -1894,12 +1939,47 @@ else
   say "  (bd not installed — doctrine cache fixture skipped)"
 fi
 
+# 14. The unpriceable classification. It is an excuse, so the value of the
+# fixture is in what it REFUSES to excuse: a version that excused every cost.sh
+# failure would pass the sweep over this corpus and hide the day a new Claude
+# model ships without a rate. Each row is: cost.sh exit (ok|fail), then the
+# models unpriceable_models reports ("-" for none), then the model ids.
+mkmeter() {
+  jq -n '{session: {id: "fixture-unpriceable", cwd: "/", branch: "main",
+            started: "2026-10-01T00:00:00Z", ended: "2026-10-01T00:00:01Z",
+            wall_s: 1, active_s: 1, agent_s: 0, agent_turns: 0},
+          tokens: ($ARGS.positional | map({model: ., lane: "main", turns: 1,
+            input: 100, output: 100, cache_read: 0, cache_w_5m: 0, cache_w_1h: 0,
+            thinking: 0, web_search: 0, web_fetch: 0, efforts: {high: 1}})),
+          agents: [], work: {tools: {}, files: {}, skills: []},
+          friction: {tool_errors: 0, interrupts: 0, denials: 0}, evidence: []}' \
+    --args "$@"
+}
+while IFS='|' read -r want_rc want_um models; do
+  [ -n "$want_rc" ] || continue
+  # Unquoted on purpose: the model ids are whitespace-separated in the table.
+  m="$(mkmeter $models)"
+  printf '%s' "$m" | "$S/cost.sh" >/dev/null 2>&1; rc=$?
+  got_rc=ok; [ "$rc" -eq 0 ] || got_rc=fail
+  got_um="$(unpriceable_models "$m")"; [ -n "$got_um" ] || got_um="-"
+  if [ "$got_rc" = "$want_rc" ] && [ "$got_um" = "$want_um" ]; then ok
+  else bad "unpriceable [$models]: cost.sh=$got_rc excused=$got_um, expected $want_rc / $want_um"; fi
+done <<'EOF'
+ok|-|claude-opus-5
+ok|-|claude-opus-5-20260101
+fail|minimax-m3|minimax-m3
+fail|minimax-m3|claude-opus-5 minimax-m3
+fail|minimax-m3,qwen3.8-flash|qwen3.8-flash minimax-m3
+fail|-|claude-not-in-the-table-9
+fail|-|minimax-m3 claude-not-in-the-table-9
+EOF
+
 say "  fixtures checked"
 
 # ---------------------------------------------------------------- result
 echo
 if [ "$fail" -eq 0 ]; then
-  echo "PASS  $pass checks, $sessions sessions"
+  echo "PASS  $pass checks, $sessions sessions ($unpriced unpriceable)"
 else
   echo "FAIL  $fail failed, $pass passed" >&2
 fi
