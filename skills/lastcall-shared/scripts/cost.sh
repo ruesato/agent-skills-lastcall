@@ -41,14 +41,18 @@ jq -s --slurpfile r "$RATES" --argjson drift "$DRIFT_PCT" '
         # it silently poisons every ledger comparison downstream.
         error("unknown model \($model) (normalized: \($model|norm)) — add it to rates.json from the claude-api skill")
       else . end
+    # cr is the cache-read multiplier of input. It is structural for most models
+    # (0.10) but the pricing page lists lower ones for some (0.05, 0.025), so a
+    # model may carry its own and the table-wide figure is only the fallback.
+    | ($rate.cache_read // $rates.multipliers.cache_read) as $cr
     | if $rate.promo != null and $when <= ($rate.promo.until + "T23:59:59Z")
-      then { input: $rate.promo.input, output: $rate.promo.output, promo: true }
-      else { input: $rate.input,       output: $rate.output,       promo: false } end;
+      then { input: $rate.promo.input, output: $rate.promo.output, cr: $cr, promo: true }
+      else { input: $rate.input,       output: $rate.output,       cr: $cr, promo: false } end;
 
   # Dollars for one token row, given its rate and the structural multipliers.
   def usd($p; $mult):
     ( (.input      // 0) * $p.input
-    + (.cache_read // 0) * $p.input * $mult.cache_read
+    + (.cache_read // 0) * $p.input * $p.cr
     + (.cache_w_5m // 0) * $p.input * $mult.cache_write_5m
     + (.cache_w_1h // 0) * $p.input * $mult.cache_write_1h
     + (.output     // 0) * $p.output
@@ -79,7 +83,7 @@ jq -s --slurpfile r "$RATES" --argjson drift "$DRIFT_PCT" '
   # null, never 0, when no token row carries the field: that is meter output
   # written before this existed, which is unmeasured.
   | ( if ($priced | map(has("thinking_carry")) | any)
-      then ($priced | map((.thinking_carry // 0) * .p.input * $mult.cache_read)
+      then ($priced | map((.thinking_carry // 0) * .p.input * .p.cr)
             | add // 0 | . / 1000000 | r4)
       else null end ) as $tcarry
 
@@ -120,9 +124,8 @@ jq -s --slurpfile r "$RATES" --argjson drift "$DRIFT_PCT" '
   | ( ($m.work.tool_context // null) as $tc
       | if (($m.work // {}) | has("tool_context") | not) or $tc == null then null
         else $tc
-             | map(. + { _carry_usd: ((.carry_tokens // 0)
-                                      * (.model | eff($rates; $when)).input
-                                      * $mult.cache_read / 1000000) })
+             | map((.model | eff($rates; $when)) as $e
+                   | . + { _carry_usd: ((.carry_tokens // 0) * $e.input * $e.cr / 1000000) })
              | group_by(.tool)
              | map({ tool: .[0].tool,
                      calls:          (map(.calls) | add),
@@ -177,6 +180,15 @@ jq -s --slurpfile r "$RATES" --argjson drift "$DRIFT_PCT" '
                  or (.service_tier // "standard") != "standard")
         | "\(.model) (\(.lane)): speed=\(.speed // "unrecorded") service_tier=\(.service_tier // "unrecorded") — priced at standard rates; rates.json has no tier axis"
       ]
+      # A model priced by prompt length (Haiku 5.5) bills each request on its own
+      # prompt size, which the meter does not keep per request. The figure here
+      # uses the base rate, so it can only understate.
+      + [ $m.tokens[]
+          | . as $row
+          | ($rates.models[($row.model | norm)].long_prompt // null) as $lp
+          | select($lp != null)
+          | "\($row.model) (\($row.lane)): priced at the base rate; requests with a prompt over \($lp.over_tokens) tokens bill at $\($lp.input) in / $\($lp.output) out per million and the meter does not keep prompt size per request, so this can only understate"
+        ]
       + ( ([ $m.tokens[] | .web_search // 0 ] | add // 0)
           | if . > 0 then
               ["\(.) web search calls carry per-request spend that no token bucket expresses — NOT in this total"]
@@ -277,7 +289,7 @@ jq -s --slurpfile r "$RATES" --argjson drift "$DRIFT_PCT" '
       # Where the money actually went, in dollars rather than tokens.
       by_bucket: {
         input:       ($priced | map((.input      // 0) * .p.input) | add // 0),
-        cache_read:  ($priced | map((.cache_read // 0) * .p.input * $mult.cache_read) | add // 0),
+        cache_read:  ($priced | map((.cache_read // 0) * .p.input * .p.cr) | add // 0),
         cache_write: ($priced | map(((.cache_w_5m // 0) * $mult.cache_write_5m
                                    + (.cache_w_1h // 0) * $mult.cache_write_1h) * .p.input) | add // 0),
         output:      ($priced | map((.output     // 0) * .p.output) | add // 0)

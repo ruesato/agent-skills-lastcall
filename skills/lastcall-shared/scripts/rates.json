@@ -1,7 +1,7 @@
 {
-  "_comment": "Rate table for cost computation. See ../references/pricing.md. Refresh from the claude-api skill; do not edit from memory.",
-  "verified_on": "2026-08-18",
-  "source": "claude-api",
+  "_comment": "Rate table for cost computation. See ../references/pricing.md. Refresh from the canonical pricing page; do not edit from memory. Prices are USD per million tokens. A model's own cache_read overrides multipliers.cache_read (the page prices cache hits at 0.025x on Fable 5.1 and 0.05x on Opus 5.5 and Sonnet 5.5). Not listed: Mythos 5 and 5.1 (limited availability, API ids not verified) and retired models (Opus 4.1, Opus 4, Sonnet 4, Haiku 3.5); cost.sh fails loudly on an unlisted model.",
+  "verified_on": "2026-10-12",
+  "source": "platform.claude.com/docs/en/about-claude/pricing",
 
   "multipliers": {
     "cache_read": 0.10,
@@ -10,14 +10,20 @@
   },
 
   "models": {
-    "claude-opus-5":    { "input": 5.00,  "output": 25.00 },
-    "claude-opus-4-8":  { "input": 5.00,  "output": 25.00 },
-    "claude-opus-4-7":  { "input": 5.00,  "output": 25.00 },
-    "claude-opus-4-6":  { "input": 5.00,  "output": 25.00 },
-    "claude-sonnet-5":  { "input": 3.00,  "output": 15.00,
-                          "promo": { "input": 2.00, "output": 10.00, "until": "2026-08-31" } },
-    "claude-sonnet-4-6":{ "input": 3.00,  "output": 15.00 },
-    "claude-haiku-4-5": { "input": 1.00,  "output": 5.00 },
-    "claude-fable-5":   { "input": 10.00, "output": 50.00 }
+    "claude-fable-5-1":  { "input": 10.00, "output": 50.00, "cache_read": 0.025 },
+    "claude-fable-5":    { "input": 10.00, "output": 50.00 },
+    "claude-opus-5-5":   { "input": 4.00,  "output": 20.00, "cache_read": 0.05 },
+    "claude-opus-5":     { "input": 5.00,  "output": 25.00 },
+    "claude-opus-4-8":   { "input": 5.00,  "output": 25.00 },
+    "claude-opus-4-7":   { "input": 5.00,  "output": 25.00 },
+    "claude-opus-4-6":   { "input": 5.00,  "output": 25.00 },
+    "claude-opus-4-5":   { "input": 5.00,  "output": 25.00 },
+    "claude-sonnet-5-5": { "input": 2.00,  "output": 10.00, "cache_read": 0.05 },
+    "claude-sonnet-5":   { "input": 2.00,  "output": 10.00 },
+    "claude-sonnet-4-6": { "input": 3.00,  "output": 15.00 },
+    "claude-sonnet-4-5": { "input": 3.00,  "output": 15.00 },
+    "claude-haiku-5-5":  { "input": 0.10,  "output": 0.50,
+                           "long_prompt": { "over_tokens": 100000, "input": 0.50, "output": 2.50 } },
+    "claude-haiku-4-5":  { "input": 1.00,  "output": 5.00 }
   }
 }

@@ -19,9 +19,14 @@ usd = ( input      × Pin
       ) / 1_000_000
 ```
 
-The three multipliers are **structural** — they're defined as ratios of the
-model's base input price and don't vary by model. `Pin`/`Pout` are per-model
-and come from the rate table.
+The cache-write multipliers are **structural** — ratios of the model's base
+input price that hold for every model on the pricing page. The cache-read
+multiplier is 0.10 for most models, but the page lists **0.05 for Opus 5.5 and
+Sonnet 5.5 and 0.025 for Fable 5.1**, so a model in `rates.json` may carry its
+own `cache_read` and the table-wide 0.10 is only the fallback. Using 0.10 for
+Sonnet 5.5 overstates its cache reads by 2x, and on a long session cache reads
+are a third of the bill. `Pin`/`Pout` are per-model and come from the rate
+table.
 
 ## Why cache dominates
 
@@ -54,7 +59,14 @@ total that silently omits them looks complete:
 - **Non-standard pricing dimensions.** `speed` (fast mode) and `service_tier`
   (priority, batch) change what a request bills at, and `rates.json` has no axis
   for either. Such a row is priced at standard rates **and flagged**. Never
-  quietly accept the standard-rate figure for it.
+  quietly accept the standard-rate figure for it. (Fast mode on the pricing page
+  is $8 in / $40 out for Opus 5.5 and $10 / $50 for Opus 5 and 4.8, as of
+  2026-10-12.)
+- **Prompt-length pricing.** Haiku 5.5 bills a request at higher rates when its
+  prompt is over 100,000 tokens, cache reads and writes included. The meter keeps
+  token totals per lane, not prompt size per request, so `cost.sh` prices Haiku
+  5.5 at the base rate, flags it from the model's `long_prompt` entry, and the
+  figure can only understate.
 
 `thinking` is the opposite case: it is already inside `output` and priced there.
 Never add it to a total.
@@ -86,15 +98,18 @@ ledger comparison downstream. Ledger rows are only comparable if their
 promotional rate stay billed at that rate after the promo lapses. `cost.sh`
 compares `session.ended` to each promo's `until`:
 
-| Session ended | Sonnet 5, 1M in + 1M out | Rate |
-|---|---|---|
-| 2026-08-17 | $12.00 | promo ($2 / $10) |
-| 2026-09-01 | $18.00 | list ($3 / $15) |
+`rates.json` has **no promotional rate at the moment**, but the mechanism stays:
+add a `promo` block with an `until` date to a model and `cost.sh` applies it to
+sessions that ended on or before that date.
 
-⚠️ **Sonnet 5's introductory pricing ends 2026-08-31.** Sessions after that
-date bill 50% higher. Any trend line spanning the boundary will show a step
-change that is a *pricing* change, not a behavior change — `pricing_source`
-and `promo_applied` are what let a reader tell those apart.
+History worth knowing: Sonnet 5 launched at an introductory $2 / $10 through
+2026-08-31, with $3 / $15 scheduled for 2026-09-01. The pricing page now says
+that increase **will not occur**, and $2 / $10 is the standard price. Until
+2026-10-12 this table still carried the lapsing promo, which would have billed
+any later Sonnet 5 session at $3 / $15, 50% too high. No ledger row was affected
+(the last Sonnet 5 session ended 2026-08-30), but a trend line that spans a
+pricing change should still be read through `pricing_source` and
+`promo_applied`.
 
 **Dated model ids normalize.** Transcripts carry
 `claude-haiku-4-5-20251001`; the rate table is keyed on the bare alias. The
@@ -102,9 +117,14 @@ trailing `-YYYYMMDD` is stripped before lookup.
 
 ## Refreshing the table
 
-Load the `claude-api` skill and ask for current per-model input/output rates
-plus the cache multipliers. Update `rates.json`, and bump `verified_on` —
-that date is what `pricing_source` reports into the ledger, so a stale table
-is at least an *identifiable* stale table.
+Read the model table on the pricing page
+(`https://platform.claude.com/docs/en/about-claude/pricing`), or load the
+`claude-api` skill, for current per-model input and output rates and the
+cache multipliers. Check each row's cache-hit price against 0.10x of its input
+price, and give any model that differs its own `cache_read`. Update
+`rates.json`, and bump `verified_on` and `source` — together they are what
+`pricing_source` reports into the ledger, so a stale table is at least an
+*identifiable* stale table. The 2026-10-12 refresh read the page directly,
+which is why `source` names it instead of `claude-api`.
 
 Rates last verified: see `verified_on` in `rates.json`.
