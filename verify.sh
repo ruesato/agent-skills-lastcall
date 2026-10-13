@@ -1974,6 +1974,60 @@ fail|-|claude-not-in-the-table-9
 fail|-|minimax-m3 claude-not-in-the-table-9
 EOF
 
+# 15. agent_s is the UNION of the turn intervals, not the sum of their durations.
+# Turns overlap when a long one outlives the short ones completed inside it, and
+# a sum counts those minutes twice: 20 of 105 local sessions were overstated,
+# one of them past its own wall clock. Each record is written at turn END, so a
+# turn is the interval [end - duration, end]. Built from transcripts because the
+# arithmetic lives in the meter, and a cost.sh-style stub would not reach it.
+# Each row below is: dir, session id, first record, then end@duration-ms turns.
+AROOT="$(mktemp -d "$TMP/lastcall-fixture.XXXXXX")"
+tdur() {  # tdur <dir> <session-id> <first-record-ts> <end-ts@duration-ms>...
+  local dir="$1" id="$2" first="$3"; shift 3
+  mkdir -p "$AROOT/$dir"
+  { jq -cn --arg id "$id" --arg c "$PWD" --arg t "$first" \
+      '{sessionId: $id, cwd: $c, gitBranch: "main", type: "user", timestamp: $t}'
+    local t
+    for t in "$@"; do
+      jq -cn --arg id "$id" --arg c "$PWD" --arg t "${t%%@*}" --argjson ms "${t##*@}" \
+        '{sessionId: $id, cwd: $c, type: "system", subtype: "turn_duration",
+          durationMs: $ms, timestamp: $t}'
+    done
+  } >> "$AROOT/$dir/$id.jsonl"
+}
+agent_of() {  # agent_of <session-id> -> "agent_s agent_turns wall_s"
+  CLAUDE_PROJECTS="$AROOT" "$S/meter-session.sh" "$1" 2>/dev/null \
+    | jq -r '[.session.agent_s, .session.agent_turns, .session.wall_s] | @tsv'
+}
+# Two turns finish inside a third that outlives them: 100 + 30 + 590 = 720 summed
+# but only 590 of real time, inside a 600s session.
+tdur p1 fixture-agent-overlap 2026-10-01T00:00:00.000Z \
+  2026-10-01T00:02:00.000Z@100000 2026-10-01T00:03:00.000Z@30000 2026-10-01T00:10:00.000Z@590000
+# Turns that do NOT overlap must still sum exactly. The ends carry milliseconds
+# on purpose: truncated to whole seconds the second turn would appear to start
+# 0.7s before the first ended, and the union would shave it off. The last end is
+# also past the whole-second session bound, which pins the one second of slack.
+tdur p1 fixture-agent-seq 2026-10-01T00:00:00.000Z \
+  2026-10-01T00:01:00.100Z@50100 2026-10-01T00:02:00.900Z@60700
+# A turn cannot claim time from before the session began.
+tdur p1 fixture-agent-clamp 2026-10-01T00:01:00.000Z 2026-10-01T00:02:00.000Z@300000
+# The same overlap, split across the two project dirs a rename produces: the
+# union has to run over the combined timeline, not each file on its own.
+tdur p-old fixture-agent-split 2026-10-01T00:00:00.000Z 2026-10-01T00:05:00.000Z@290000
+tdur p-new fixture-agent-split 2026-10-01T00:02:00.000Z 2026-10-01T00:08:00.000Z@300000
+while IFS='|' read -r sid want label; do
+  [ -n "$sid" ] || continue
+  got="$(agent_of "$sid" | tr '\t' ' ')"
+  if [ "$got" = "$want" ]; then ok
+  else bad "agent_s $label: got [$got], expected [$want] (agent_s agent_turns wall_s)"; fi
+done <<'EOF'
+fixture-agent-overlap|590 3 600|overlapping turns are counted once
+fixture-agent-seq|110.8 2 120|sequential turns sum exactly, ms ends kept
+fixture-agent-clamp|60 1 60|a turn is clamped to the session start
+fixture-agent-split|470 2 480|overlap across a split session is unioned
+EOF
+rm -rf "$AROOT"
+
 say "  fixtures checked"
 
 # ---------------------------------------------------------------- result

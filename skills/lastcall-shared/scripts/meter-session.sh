@@ -50,7 +50,11 @@ IMAGE_TOKENS="${LASTCALL_IMAGE_TOKENS:-1600}"
 #   2 -- 2026-08-24: dedup falls back to message.id, so Bedrock-served
 #        transcripts collapse their streaming chunks instead of counting every
 #        chunk as a turn (~2x inflation on those sessions).
-METER_VERSION=2
+#   3 -- 2026-10-12: agent_s is the union of the turn_duration intervals, not
+#        the sum of their durations. Turns can overlap (a long turn outlives
+#        the turns completed inside it), so the sum double-counted them and
+#        could exceed wall_s. Sessions with sequential turns are unchanged.
+METER_VERSION=3
 
 # Project dir slug: every character that is not alphanumeric or "-" becomes
 # "-". Covers "/", ".", and "+" (worktree branch names like "feat+ui-refinement").
@@ -388,6 +392,22 @@ meter_file() {
     # a turn. Reported beside $active, never instead of it.
     | ( map(select(.type == "system" and .subtype == "turn_duration")) ) as $td
 
+    # Each record is written when its turn ENDS and carries how long the turn
+    # lasted, so the interval is [end - duration, end]. Turns are not always
+    # sequential: a long turn can outlive the shorter ones completed inside it
+    # (background agents, queued input), and summing durations then counts those
+    # minutes twice. The intervals are kept raw here and coalesced where the
+    # lanes are combined, which is also what lets a session split across two
+    # project dirs be unioned as one timeline. Millisecond precision is kept:
+    # whole-second ends would manufacture sub-second overlaps between turns that
+    # ran back to back and shave them off the total.
+    | ( [ $td[]
+          | select(.timestamp != null and .durationMs != null)
+          | ( (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)
+              + ((.timestamp | capture("\\.(?<f>[0-9]+)Z$")? | ("0." + .f) | tonumber) // 0)
+            ) as $e
+          | [ $e - (.durationMs / 1000), $e ] ] ) as $agent_spans
+
     | ( map(select(.type == "assistant") | .message.content[]?
             | select(.type == "tool_use")) ) as $tools
 
@@ -564,7 +584,7 @@ meter_file() {
         dedup: ($dedup + $adjdup),
         first_ts: ($ts | first), last_ts: ($ts | last), active_s: $active,
         spans: $spans,
-        agent_s:     (($td | map(.durationMs) | add // 0) / 1000),
+        agent_spans: $agent_spans,
         agent_turns: ($td | length),
         # Grouped by the dimensions that change what a request BILLS at. speed
         # (fast mode) and service_tier (priority, batch) both do; collapsing
@@ -737,7 +757,28 @@ meter_file() {
         # Native agent-busy time. Only the main thread emits turn_duration, and
         # only for turns that have ENDED, so this is a floor: a session metered
         # mid-turn is missing the turn being metered.
-        agent_s:     (map(select(.lane=="main") | .agent_s)     | add // 0),
+        #
+        # The UNION of the turn intervals, not the sum of their durations: turns
+        # can overlap, and a sum counts the shared minutes twice. Observed on
+        # session fda09eb7, where a 1917s turn ended after two shorter turns had
+        # completed inside it and the sum came to 2058s inside a 1975s session.
+        # Clamped to the session window so a turn cannot claim time before the
+        # session began. The window bounds are whole seconds while the turn ends
+        # carry milliseconds, so the end gets one second of slack: clamping to
+        # the bare bound would shave the sub-second tail off every ordinary
+        # session. The price is that agent_s can exceed wall_s by under a
+        # second, which verify.sh already tolerates. The merge is the same
+        # coalescing the spans above use.
+        agent_s:
+          ( [ .[] | select(.lane == "main") | .agent_spans[]? ]
+            | sort_by(.[0])
+            | reduce .[] as $sp ([];
+                if (length == 0) or ($sp[0] > (.[-1][1]))
+                then . + [$sp]
+                else (.[0:-1] + [[.[-1][0], ([.[-1][1], $sp[1]] | max)]]) end)
+            | map([ ([.[0], $t0] | max), ([.[1], $t1 + 1] | min) ]
+                  | select(.[1] > .[0]) | .[1] - .[0])
+            | ((add // 0) * 1000 | round) / 1000 ),
         agent_turns: (map(select(.lane=="main") | .agent_turns) | add // 0),
         # null when the session never got a title, which is unmeasured rather
         # than untitled. Latest wins: a split session carries the earlier one.

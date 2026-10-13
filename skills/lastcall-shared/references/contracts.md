@@ -67,10 +67,13 @@ downstream from `references/pricing.md` so this contract stays correct.
     "spans": [[1756,1799],[2100,2140]],  // when it was WORKING, epoch pairs;
                                          // sum == active_s, disjoint, ascending
 
-    // Claude Code own measure of agent-busy time: the sum of its turn_duration
-    // records. No idle heuristic in it, but it is a FLOOR — the turn in flight
-    // has not been written yet, so a session metered mid-turn is missing it,
-    // and a session that has never completed a turn reports 0.
+    // Claude Code own measure of agent-busy time: the UNION of the intervals
+    // its turn_duration records describe, each [end - duration, end]. Not the
+    // sum of the durations: turns overlap when a long one outlives the shorter
+    // ones completed inside it, and a sum counts those minutes twice. No idle
+    // heuristic in it, but it is a FLOOR — the turn in flight has not been
+    // written yet, so a session metered mid-turn is missing it, and a session
+    // that has never completed a turn reports 0.
     "agent_s":     4177.8,
     "agent_turns": 17,    // completed user turns that contributed to agent_s
 
@@ -453,6 +456,14 @@ Each of these silently corrupts totals if a reimplementation drops it:
 13. **`agent_s` is a floor, never a replacement for `active_s`.** They measure
    different things — agent busy versus human engaged — and only `active_s`
    covers the turn currently in flight.
+   **It is a union of intervals, not a sum of durations.** Before
+   `METER_VERSION` 3 it was the sum, which overstated any session whose turns
+   overlapped: 20 of 105 local sessions, by up to 17%, and one of them past its
+   own wall clock. Rows written under version 2 carry the overstated figure;
+   `ledger.sh trend` reports the version split under `meter_regimes`. Intervals
+   are clamped to the session window with one second of slack at the end,
+   because the window bounds are whole seconds and the turn ends carry
+   milliseconds, so `agent_s` can exceed `wall_s` by under a second.
 13. **A `work.skills` row is not a skill price tag, and attribution is not
    sticky.** The row measures spend while a skill held attribution, which is
    window length times resident context. A cheap skill invoked late in a large
