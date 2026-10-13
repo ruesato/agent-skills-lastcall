@@ -187,7 +187,7 @@ jq -s --slurpfile r "$RATES" --argjson drift "$DRIFT_PCT" '
           | . as $row
           | ($rates.models[($row.model | norm)].long_prompt // null) as $lp
           | select($lp != null)
-          | "\($row.model) (\($row.lane)): priced at the base rate; requests with a prompt over \($lp.over_tokens) tokens bill at $\($lp.input) in / $\($lp.output) out per million and the meter does not keep prompt size per request, so this can only understate"
+          | "\($row.model) (\($row.lane)): priced at the base rate; prompts over \($lp.over_tokens) tokens bill at $\($lp.input) in / $\($lp.output) out per million and the meter does not keep prompt size per request, so this can only understate"
         ]
       + ( ([ $m.tokens[] | .web_search // 0 ] | add // 0)
           | if . > 0 then
